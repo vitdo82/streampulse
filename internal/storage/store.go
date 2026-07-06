@@ -1,0 +1,99 @@
+// Package storage defines the MetricsStore interface and SQLite implementation.
+package storage
+
+import (
+	"context"
+	"time"
+)
+
+// ─── Domain Types ──────────────────────────────────────────────────────────
+
+// Metric represents a single scraped metric data point.
+type Metric struct {
+	TS         time.Time         `json:"ts"`
+	ClusterID  string            `json:"cluster_id"`
+	Metric     string            `json:"metric"`
+	EntityType string            `json:"entity_type"` // topic, consumer_group, broker
+	EntityName string            `json:"entity_name"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	Value      float64           `json:"value"`
+}
+
+// MetricRow is a query result row (aggregated or raw).
+type MetricRow struct {
+	TimeStart  time.Time         `json:"time_start"`
+	ClusterID  string            `json:"cluster_id"`
+	Metric     string            `json:"metric"`
+	EntityType string            `json:"entity_type"`
+	EntityName string            `json:"entity_name"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	Avg        float64           `json:"avg"`
+	Min        float64           `json:"min"`
+	Max        float64           `json:"max"`
+	P50        float64           `json:"p50"`
+	P95        float64           `json:"p95"`
+	P99        float64           `json:"p99"`
+	Count      int64             `json:"count"`
+	Sum        float64           `json:"sum"`
+}
+
+// QueryParams filters metric queries.
+type QueryParams struct {
+	ClusterID  string
+	Metric     string
+	EntityType string
+	EntityName string
+	From       time.Time
+	To         time.Time
+	Limit      int
+}
+
+// Retention defines data retention policies.
+type Retention struct {
+	Raw    time.Duration
+	Hourly time.Duration
+	Daily  time.Duration
+}
+
+// ─── Interface ─────────────────────────────────────────────────────────────
+
+// MetricsStore is the pluggable storage backend for metrics and analytics.
+// Implementations: SQLite (v0.1), PostgreSQL (v0.2), ClickHouse (v0.3).
+type MetricsStore interface {
+	// WriteBatch writes raw scraped metrics.
+	WriteBatch(ctx context.Context, metrics []Metric) error
+
+	// Query methods for analytics layers.
+	QueryRaw(ctx context.Context, params QueryParams) ([]MetricRow, error)
+	QueryHourly(ctx context.Context, params QueryParams) ([]MetricRow, error)
+	QueryDaily(ctx context.Context, params QueryParams) ([]MetricRow, error)
+
+	// Rollup aggregates raw → hourly and hourly → daily.
+	Rollup(ctx context.Context, resolution string) error
+
+	// Purge removes expired data according to retention policy.
+	Purge(ctx context.Context, retention Retention) error
+
+	// Ping checks connectivity.
+	Ping(ctx context.Context) error
+
+	// Migrate runs schema migrations.
+	Migrate(ctx context.Context) error
+
+	// Close cleans up resources.
+	Close() error
+}
+
+// NewStore creates a MetricsStore based on configuration type.
+func NewStore(storeType, dsn string) (MetricsStore, error) {
+	switch storeType {
+	case "sqlite", "":
+		return NewSQLiteStore(dsn)
+	case "postgres":
+		return nil, nil // TODO: v0.2
+	case "clickhouse":
+		return nil, nil // TODO: v0.3
+	default:
+		return NewSQLiteStore(dsn) // default to SQLite
+	}
+}

@@ -1,0 +1,69 @@
+# StreamPulse development environment
+# Single Kafka broker in KRaft mode (no ZooKeeper)
+#
+# Usage:
+#   docker compose up -d          # Start
+#   docker compose logs -f kafka  # Logs
+#   docker compose down -v        # Stop + cleanup
+#
+# Connect from host:    localhost:9093
+# Connect from Docker:  kafka:9092
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: streampulse-kafka
+    hostname: kafka
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./kafka/server.properties:/opt/kafka/config/server.properties:ro
+      - kafka_data:/var/lib/kafka/data
+    # Bypass ALL Docker wrappers — format + start directly
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        /opt/kafka/bin/kafka-storage.sh format \
+          --config /opt/kafka/config/server.properties \
+          --cluster-id "MkU3OEVBNTcwNTJENDM2Qk" \
+          --ignore-formatted
+        exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+
+  producer:
+    image: apache/kafka:3.9.0
+    container_name: streampulse-producer
+    depends_on:
+      kafka:
+        condition: service_started
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Waiting for Kafka..."
+        for i in $$(seq 1 30); do
+          /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1 && break
+          sleep 2
+        done
+        echo "Creating topics..."
+        for spec in orders:6 payments:3 inventory:3 audit:4 payments.dlq:2 orders.dlq:2; do
+          name="$${spec%%:*}"
+          parts="$${spec##*:}"
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$name" --partitions "$$parts" --replication-factor 1
+        done
+        echo "Producing..."
+        c=0
+        while true; do
+          ts=$$(date +%s)000
+          echo "{\"id\":\"ord_$$c\",\"amount\":$$((RANDOM%500+10)),\"ts\":$$ts}" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic orders 2>/dev/null
+          echo "{\"id\":\"pay_$$c\",\"status\":\"ok\",\"amount\":$$((RANDOM%200+5))}" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic payments 2>/dev/null
+          if [ $$((c%20)) -eq 0 ]; then
+            echo "{\"error\":\"DB_TIMEOUT\",\"id\":\"pay_$$c\"}" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic payments.dlq 2>/dev/null
+          fi
+          c=$$((c+1))
+          sleep 2
+        done
+    restart: "no"
+
+volumes:
+  kafka_data:

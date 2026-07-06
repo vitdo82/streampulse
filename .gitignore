@@ -1,0 +1,43 @@
+# Binaries
+bin/
+streampulse
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go coverage
+*.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# StreamPulse data
+~/.streampulse/
+
+# Build artifacts
+dist/
+release/
+
+# Environment
+.env
+.env.local
