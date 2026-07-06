@@ -65,5 +65,26 @@ services:
         done
     restart: "no"
 
+  consumer:
+    image: apache/kafka:3.9.0
+    container_name: streampulse-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Waiting for Kafka and messages..."
+        sleep 10
+        /opt/kafka/bin/kafka-console-consumer.sh \
+          --bootstrap-server kafka:9092 \
+          --topic orders \
+          --group orders-processor \
+          --from-beginning 2>/dev/null &
+        PID=$$!
+        while true; do sleep 30; done
+    restart: "no"
+
 volumes:
   kafka_data:

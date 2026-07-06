@@ -12,12 +12,14 @@ build:
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(APP_NAME) ./$(CMD_DIR)
 
 ## run: Build and run the TUI (uses mock data if no Kafka available)
+#   make run ARGS="--brokers localhost:9093"
 run: build
-	$(BUILD_DIR)/$(APP_NAME)
+	$(BUILD_DIR)/$(APP_NAME) $(ARGS)
 
 ## serve: Build and run daemon mode
+#   make serve ARGS="--brokers localhost:9093"
 serve: build
-	$(BUILD_DIR)/$(APP_NAME) serve --brokers localhost:9092
+	$(BUILD_DIR)/$(APP_NAME) serve $(ARGS)
 
 ## test: Run all tests
 test:

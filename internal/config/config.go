@@ -23,19 +23,19 @@ type SQLiteConfig struct {
 
 // DBConfig holds database connection settings.
 type DBConfig struct {
-	DSN            string `mapstructure:"dsn"`
-	MaxConns       int    `mapstructure:"max_connections"`
-	SSLMode        string `mapstructure:"ssl_mode"`
+	DSN      string `mapstructure:"dsn"`
+	MaxConns int    `mapstructure:"max_connections"`
+	SSLMode  string `mapstructure:"ssl_mode"`
 }
 
 // AlertRule defines an alert condition.
 type AlertRule struct {
-	Name      string           `mapstructure:"name"`
-	Group     string           `mapstructure:"group"`
-	Condition string           `mapstructure:"condition"`
-	For       string           `mapstructure:"for"`
-	Severity  string           `mapstructure:"severity"`
-	Notify    []AlertChannel   `mapstructure:"notify"`
+	Name      string         `mapstructure:"name"`
+	Group     string         `mapstructure:"group"`
+	Condition string         `mapstructure:"condition"`
+	For       string         `mapstructure:"for"`
+	Severity  string         `mapstructure:"severity"`
+	Notify    []AlertChannel `mapstructure:"notify"`
 }
 
 // AlertChannel defines a notification target.

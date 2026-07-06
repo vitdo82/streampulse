@@ -3,7 +3,9 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/pulsedev/streampulse/internal/kafka"
 )
 
 // ─── Styles ────────────────────────────────────────────────────────────────
@@ -54,6 +58,24 @@ var (
 
 type tickMsg time.Time
 
+// topicsMsg carries the result of an asynchronous topic fetch.
+type topicsMsg struct {
+	topics []kafka.TopicInfo
+	err    error
+}
+
+// clusterInfoMsg carries the result of an asynchronous DescribeCluster fetch.
+type clusterInfoMsg struct {
+	info *kafka.ClusterInfo
+	err  error
+}
+
+// groupsMsg carries the result of an asynchronous consumer group fetch.
+type groupsMsg struct {
+	groups []kafka.GroupInfo
+	err    error
+}
+
 // Model is the bubbletea model for the StreamPulse TUI.
 type Model struct {
 	width  int
@@ -62,78 +84,141 @@ type Model struct {
 	activeTab int
 	tabs      []string
 
+	kafkaClient *kafka.Client
+
 	// Tables
-	brokersTable  table.Model
-	topicsTable   table.Model
-	groupsTable   table.Model
-	alertsTable   table.Model
-	dlqTable      table.Model
+	brokersTable table.Model
+	topicsTable  table.Model
+	groupsTable  table.Model
+	alertsTable  table.Model
+	dlqTable     table.Model
+
+	// Topic fetch state
+	topicsLoading  bool
+	topicsErr      error
+	topicCount     int
+	partitionCount int
+
+	// Cluster fetch state
+	clusterLoading bool
+	clusterErr     error
+	brokerCount    int
+	brokers        []kafka.BrokerInfo
+
+	// Consumer group fetch state
+	groupsLoading bool
+	groupsErr     error
+	groupCount    int
 
 	// Log viewport
-	logs      []string
-	logView   viewport.Model
+	logs    []string
+	logView viewport.Model
 
 	ready bool
 }
 
-// NewModel creates a new TUI model with mock data for demonstration.
-func NewModel() *Model {
+// NewModel creates a new TUI model. When client is nil, mock data is used.
+func NewModel(client *kafka.Client) *Model {
 	m := &Model{
-		tabs: []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		kafkaClient: client,
 	}
 
 	// Brokers table
-	m.brokersTable = newTable(
-		[]table.Column{
-			{Title: "BROKER", Width: 16},
-			{Title: "STATUS", Width: 8},
-			{Title: "CPU", Width: 8},
-			{Title: "MEM", Width: 8},
-			{Title: "MSGS/S", Width: 10},
-			{Title: "BYTES/S", Width: 12},
-		},
-		[]table.Row{
-			{"broker-1", statusOK + " OK", "34%", "62%", "42.1k", "12.4 MB/s"},
-			{"broker-2", statusOK + " OK", "28%", "58%", "38.7k", "11.8 MB/s"},
-			{"broker-3", statusWarn + " WARN", "72%", "91%", "28.4k", "8.2 MB/s"},
-		},
-	)
+	if client != nil {
+		m.clusterLoading = true
+		m.brokersTable = newTable(
+			[]table.Column{
+				{Title: "BROKER", Width: 24},
+				{Title: "ID", Width: 6},
+				{Title: "STATUS", Width: 12},
+				{Title: "LEADERS", Width: 8},
+				{Title: "REPLICAS", Width: 10},
+				{Title: "RACK", Width: 10},
+			},
+			[]table.Row{{"Loading brokers...", "-", "-", "-", "-", "-"}},
+		)
+	} else {
+		m.brokersTable = newTable(
+			[]table.Column{
+				{Title: "BROKER", Width: 16},
+				{Title: "STATUS", Width: 8},
+				{Title: "CPU", Width: 8},
+				{Title: "MEM", Width: 8},
+				{Title: "MSGS/S", Width: 10},
+				{Title: "BYTES/S", Width: 12},
+			},
+			[]table.Row{
+				{"broker-1", statusOK + " OK", "34%", "62%", "42.1k", "12.4 MB/s"},
+				{"broker-2", statusOK + " OK", "28%", "58%", "38.7k", "11.8 MB/s"},
+				{"broker-3", statusWarn + " WARN", "72%", "91%", "28.4k", "8.2 MB/s"},
+			},
+		)
+	}
 
 	// Topics table
-	m.topicsTable = newTable(
-		[]table.Column{
-			{Title: "TOPIC", Width: 20},
-			{Title: "PARTITIONS", Width: 12},
-			{Title: "MSG/S", Width: 10},
-			{Title: "BYTES/S", Width: 12},
-			{Title: "RETENTION", Width: 12},
-		},
-		[]table.Row{
-			{"orders", "12", "14.2k", "4.7 MB/s", "7d"},
-			{"payments", "6", "8.4k", "2.1 MB/s", "30d"},
-			{"inventory", "4", "3.2k", "0.8 MB/s", "7d"},
-			{"audit", "8", "22.1k", "6.8 MB/s", "90d"},
-			{"shipping", "3", "1.1k", "0.3 MB/s", "7d"},
-		},
-	)
+	if client != nil {
+		m.topicsLoading = true
+		m.topicsTable = newTable(
+			[]table.Column{
+				{Title: "TOPIC", Width: 20},
+				{Title: "PARTITIONS", Width: 12},
+				{Title: "MSG/S", Width: 10},
+				{Title: "BYTES/S", Width: 12},
+				{Title: "RETENTION", Width: 12},
+			},
+			[]table.Row{{"Loading topics...", "-", "-", "-", "-"}},
+		)
+	} else {
+		m.topicsTable = newTable(
+			[]table.Column{
+				{Title: "TOPIC", Width: 20},
+				{Title: "PARTITIONS", Width: 12},
+				{Title: "MSG/S", Width: 10},
+				{Title: "BYTES/S", Width: 12},
+				{Title: "RETENTION", Width: 12},
+			},
+			[]table.Row{
+				{"orders", "12", "14.2k", "4.7 MB/s", "7d"},
+				{"payments", "6", "8.4k", "2.1 MB/s", "30d"},
+				{"inventory", "4", "3.2k", "0.8 MB/s", "7d"},
+				{"audit", "8", "22.1k", "6.8 MB/s", "90d"},
+				{"shipping", "3", "1.1k", "0.3 MB/s", "7d"},
+			},
+		)
+	}
 
 	// Consumer groups table
-	m.groupsTable = newTable(
-		[]table.Column{
-			{Title: "GROUP", Width: 22},
-			{Title: "LAG", Width: 10},
-			{Title: "STATUS", Width: 10},
-			{Title: "MEMBERS", Width: 10},
-			{Title: "TOPIC", Width: 14},
-		},
-		[]table.Row{
-			{"payment-processor", "0", statusOK + " OK", "3", "payments"},
-			{"inventory-indexer", "147", statusWarn + " WARN", "2", "inventory"},
-			{"audit-consumer", "8.2k", statusCrit + " CRIT", "4", "audit"},
-			{"orders-matcher", "0", statusOK + " OK", "2", "orders"},
-			{"shipping-svc", "12", statusOK + " OK", "1", "shipping"},
-		},
-	)
+	if client != nil {
+		m.groupsLoading = true
+		m.groupsTable = newTable(
+			[]table.Column{
+				{Title: "GROUP", Width: 22},
+				{Title: "STATE", Width: 12},
+				{Title: "LAG", Width: 10},
+				{Title: "MEMBERS", Width: 10},
+				{Title: "TOPIC", Width: 14},
+			},
+			[]table.Row{{"Loading groups...", "-", "-", "-", "-"}},
+		)
+	} else {
+		m.groupsTable = newTable(
+			[]table.Column{
+				{Title: "GROUP", Width: 22},
+				{Title: "LAG", Width: 10},
+				{Title: "STATUS", Width: 10},
+				{Title: "MEMBERS", Width: 10},
+				{Title: "TOPIC", Width: 14},
+			},
+			[]table.Row{
+				{"payment-processor", "0", statusOK + " OK", "3", "payments"},
+				{"inventory-indexer", "147", statusWarn + " WARN", "2", "inventory"},
+				{"audit-consumer", "8.2k", statusCrit + " CRIT", "4", "audit"},
+				{"orders-matcher", "0", statusOK + " OK", "2", "orders"},
+				{"shipping-svc", "12", statusOK + " OK", "1", "shipping"},
+			},
+		)
+	}
 
 	// Alerts table
 	m.alertsTable = newTable(
@@ -187,16 +272,141 @@ func newTable(cols []table.Column, rows []table.Row) table.Model {
 	return t
 }
 
+// newTopicsTable builds the topics table from Kafka metadata.
+func (m *Model) newTopicsTable(topics []kafka.TopicInfo) table.Model {
+	cols := []table.Column{
+		{Title: "TOPIC", Width: 20},
+		{Title: "PARTITIONS", Width: 12},
+		{Title: "MSG/S", Width: 10},
+		{Title: "BYTES/S", Width: 12},
+		{Title: "RETENTION", Width: 12},
+	}
+
+	if len(topics) == 0 {
+		return newTable(cols, []table.Row{{"No topics found", "-", "-", "-", "-"}})
+	}
+
+	rows := make([]table.Row, len(topics))
+	for i, t := range topics {
+		rows[i] = table.Row{t.Name, strconv.Itoa(t.Partitions), "-", "-", "-"}
+	}
+
+	return newTable(cols, rows)
+}
+
+// newBrokersTable builds the brokers table from Kafka cluster metadata.
+func (m *Model) newBrokersTable(info *kafka.ClusterInfo) table.Model {
+	cols := []table.Column{
+		{Title: "BROKER", Width: 24},
+		{Title: "ID", Width: 6},
+		{Title: "STATUS", Width: 12},
+		{Title: "LEADERS", Width: 8},
+		{Title: "REPLICAS", Width: 10},
+		{Title: "RACK", Width: 10},
+	}
+
+	brokers := info.Brokers
+	controllerID := info.ControllerID
+
+	if len(brokers) == 0 {
+		return newTable(cols, []table.Row{{"No brokers found", "-", "-", "-", "-", "-"}})
+	}
+
+	rows := make([]table.Row, len(brokers))
+	for i, b := range brokers {
+		addr := fmt.Sprintf("%s:%d", b.Host, b.Port)
+		status := statusOK + " UP"
+		if b.ID == controllerID {
+			status = statusOK + " CONTROLLER"
+		}
+		rack := b.Rack
+		if rack == "" {
+			rack = "-"
+		}
+		rows[i] = table.Row{
+			addr,
+			strconv.Itoa(b.ID),
+			status,
+			strconv.Itoa(b.LeaderPartitions),
+			strconv.Itoa(b.ReplicaPartitions),
+			rack,
+		}
+	}
+
+	return newTable(cols, rows)
+}
+
+// newGroupsTable builds the consumer groups table from Kafka group metadata.
+func (m *Model) newGroupsTable(groups []kafka.GroupInfo) table.Model {
+	cols := []table.Column{
+		{Title: "GROUP", Width: 22},
+		{Title: "STATE", Width: 12},
+		{Title: "LAG", Width: 10},
+		{Title: "MEMBERS", Width: 10},
+		{Title: "TOPIC", Width: 14},
+	}
+
+	if len(groups) == 0 {
+		return newTable(cols, []table.Row{{"No consumer groups found", "-", "-", "-", "-"}})
+	}
+
+	rows := make([]table.Row, len(groups))
+	for i, g := range groups {
+		stateDot := statusOK
+		if strings.EqualFold(g.State, "Dead") || strings.EqualFold(g.State, "Empty") {
+			stateDot = statusWarn
+		}
+		rows[i] = table.Row{
+			g.Name,
+			stateDot + " " + g.State,
+			"-",
+			strconv.Itoa(g.Members),
+			"-",
+		}
+	}
+
+	return newTable(cols, rows)
+}
+
 // ─── Init ──────────────────────────────────────────────────────────────────
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), tea.EnterAltScreen)
+	cmds := []tea.Cmd{tickCmd(), tea.EnterAltScreen}
+	if m.kafkaClient != nil {
+		cmds = append(cmds,
+			fetchTopicsCmd(m.kafkaClient),
+			fetchClusterCmd(m.kafkaClient),
+			fetchGroupsCmd(m.kafkaClient),
+		)
+	}
+	return tea.Batch(cmds...)
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func fetchTopicsCmd(client *kafka.Client) tea.Cmd {
+	return func() tea.Msg {
+		topics, err := client.ListTopics(context.Background())
+		return topicsMsg{topics: topics, err: err}
+	}
+}
+
+func fetchClusterCmd(client *kafka.Client) tea.Cmd {
+	return func() tea.Msg {
+		info, err := client.DescribeCluster(context.Background())
+		return clusterInfoMsg{info: info, err: err}
+	}
+}
+
+func fetchGroupsCmd(client *kafka.Client) tea.Cmd {
+	return func() tea.Msg {
+		groups, err := client.ListConsumerGroups(context.Background())
+		return groupsMsg{groups: groups, err: err}
+	}
 }
 
 // ─── Update ────────────────────────────────────────────────────────────────
@@ -215,14 +425,55 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
-		m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: 3 brokers, 47 topics, 26 partitions",
-			time.Now().Format("15:04:05")))
+		if m.kafkaClient != nil {
+			m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: %d brokers, %d topics, %d groups",
+				time.Now().Format("15:04:05"), m.brokerCount, m.topicCount, m.groupCount))
+		} else {
+			m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: 3 brokers, 47 topics, 26 partitions",
+				time.Now().Format("15:04:05")))
+		}
 		if len(m.logs) > 50 {
 			m.logs = m.logs[len(m.logs)-50:]
 		}
 		m.logView.SetContent(strings.Join(m.logs, "\n"))
 		m.logView.GotoBottom()
 		cmds = append(cmds, tickCmd())
+		if m.kafkaClient != nil {
+			cmds = append(cmds,
+				fetchTopicsCmd(m.kafkaClient),
+				fetchClusterCmd(m.kafkaClient),
+				fetchGroupsCmd(m.kafkaClient),
+			)
+		}
+
+	case topicsMsg:
+		m.topicsLoading = false
+		m.topicsErr = msg.err
+		if msg.err == nil {
+			m.topicsTable = m.newTopicsTable(msg.topics)
+			m.topicCount = len(msg.topics)
+			m.partitionCount = 0
+			for _, t := range msg.topics {
+				m.partitionCount += t.Partitions
+			}
+		}
+
+	case clusterInfoMsg:
+		m.clusterLoading = false
+		m.clusterErr = msg.err
+		if msg.err == nil && msg.info != nil {
+			m.brokersTable = m.newBrokersTable(msg.info)
+			m.brokerCount = msg.info.BrokerCount
+			m.brokers = msg.info.Brokers
+		}
+
+	case groupsMsg:
+		m.groupsLoading = false
+		m.groupsErr = msg.err
+		if msg.err == nil {
+			m.groupsTable = m.newGroupsTable(msg.groups)
+			m.groupCount = len(msg.groups)
+		}
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -257,10 +508,19 @@ func (m *Model) View() string {
 
 func (m *Model) renderHeader() string {
 	left := titleStyle.Render("⚡ StreamPulse v0.1.0")
+
+	var clusterInfo string
+	if m.kafkaClient != nil {
+		clusterInfo = fmt.Sprintf("Kafka connected  │  Brokers: %d  │  Topics: %d  │  Groups: %d  │  %s",
+			m.brokerCount, m.topicCount, m.groupCount, time.Now().Format("15:04:05"))
+	} else {
+		clusterInfo = fmt.Sprintf("Cluster: prod-kafka  │  Brokers: 3  │  Topics: 47  │  Consumers: 12  │  %s",
+			time.Now().Format("15:04:05"))
+	}
+
 	right := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6B7280")).
-		Render(fmt.Sprintf("Cluster: prod-kafka  │  Brokers: 3  │  Topics: 47  │  Consumers: 12  │  %s",
-			time.Now().Format("15:04:05")))
+		Render(clusterInfo)
 
 	bar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#1F1A2E")).
@@ -313,21 +573,45 @@ func (m *Model) renderOverview() string {
 		Padding(1, 2).
 		Width(28)
 
-	cards := lipgloss.JoinHorizontal(lipgloss.Top,
-		cardStyle.Render(
+	var brokerCard, topicsCard string
+	if m.kafkaClient != nil {
+		brokerStatus := fmt.Sprintf("%d connected", m.brokerCount)
+		brokerCard = cardStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render(brokerStatus),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("real-time"),
+			),
+		)
+		topicsCard = cardStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(
+					fmt.Sprintf("%d topics", m.topicCount)),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(
+					fmt.Sprintf("%d partitions", m.partitionCount)),
+			),
+		)
+	} else {
+		brokerCard = cardStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
 				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render("3 healthy"),
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("1 warning"),
 			),
-		),
-		cardStyle.Render(
+		)
+		topicsCard = cardStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
 				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render("47 topics"),
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("312 partitions"),
 			),
-		),
+		)
+	}
+
+	cards := lipgloss.JoinHorizontal(lipgloss.Top,
+		brokerCard,
+		topicsCard,
 		cardStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("ALERTS"),
@@ -367,16 +651,32 @@ func (m *Model) renderOverview() string {
 }
 
 func (m *Model) renderTopicsView() string {
+	var status string
+	if m.topicsLoading {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  Loading topics...")
+	} else if m.topicsErr != nil {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  Error: " + m.topicsErr.Error())
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("TOPICS"),
 		m.topicsTable.View(),
+		status,
 	)
 }
 
 func (m *Model) renderConsumersView() string {
+	var status string
+	if m.groupsLoading {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  Loading groups...")
+	} else if m.groupsErr != nil {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  Error: " + m.groupsErr.Error())
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
 		m.groupsTable.View(),
+		status,
 	)
 }
 
@@ -454,9 +754,9 @@ func (m *Model) renderHelp() string {
 	)
 }
 
-// Run starts the bubbletea program.
-func Run() error {
-	m := NewModel()
+// Run starts the bubbletea program. If client is non-nil, the TUI connects to Kafka.
+func Run(client *kafka.Client) error {
+	m := NewModel(client)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err

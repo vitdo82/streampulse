@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/tui"
 	"github.com/spf13/cobra"
 )
 
-func runTUI() error {
-	return tui.Run()
+func runTUI(brokers []string) error {
+	var client *kafka.Client
+	if len(brokers) > 0 {
+		client = kafka.NewClient(brokers)
+	}
+	return tui.Run(client)
 }
 
 func newServeCommand() *cobra.Command {
