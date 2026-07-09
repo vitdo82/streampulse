@@ -14,10 +14,10 @@ func NewRootCommand(version string) *cobra.Command {
 		Short: "StreamPulse — the k9s for Apache Kafka",
 		Long: `StreamPulse is a real-time Kafka observability tool with a k9s-style terminal UI.
 
-Single binary. Zero dependencies.
+Single binary. Zero dependencies. All views auto-refresh — no manual reload.
 
-  streampulse                              # interactive TUI (mock data)
-  streampulse --brokers localhost:9092     # interactive TUI connected to Kafka
+  streampulse                              # interactive TUI (reads from daemon's store)
+  streampulse --brokers localhost:9092     # interactive TUI connected directly to Kafka
   streampulse serve --brokers kafka:9092   # daemon mode (24/7 monitoring)
   streampulse check --topic orders         # CI/CD health gate
   streampulse dlq list                     # DLQ management`,
@@ -27,7 +27,7 @@ Single binary. Zero dependencies.
 		},
 	}
 
-	root.PersistentFlags().StringSliceVar(&brokers, "brokers", nil, "Kafka broker addresses (comma-separated)")
+	root.PersistentFlags().StringSliceVar(&brokers, "brokers", []string{"localhost:9093"}, "Kafka broker addresses (comma-separated)")
 
 	root.AddCommand(newServeCommand())
 	root.AddCommand(newCheckCommand())

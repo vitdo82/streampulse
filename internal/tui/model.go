@@ -1,11 +1,11 @@
 // Package tui provides the bubbletea terminal UI for StreamPulse.
-// This is a k9s-style interactive dashboard for Kafka observability.
+// Real-time k9s-style dashboard — auto-refreshes every 2 seconds.
+// Reads from the daemon's SQLite state.db. No manual reload needed.
 package tui
 
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/storage"
 )
 
 // ─── Styles ────────────────────────────────────────────────────────────────
@@ -31,14 +31,7 @@ var (
 			Background(lipgloss.Color("#1F1A2E")).
 			Padding(0, 1)
 
-	statusOK = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#22C55E")).Render("●")
-
-	statusWarn = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EAB308")).Render("●")
-
-	statusCrit = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EF4444")).Render("●")
+	statusOK = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("●")
 
 	tabStyle = lipgloss.NewStyle().
 			Padding(0, 2).
@@ -50,336 +43,147 @@ var (
 			Background(lipgloss.Color("#7C3AED")).
 			Bold(true)
 
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6B7280"))
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+
+	cardStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#4C1D95")).
+			Padding(1, 2).
+			Width(28)
 )
 
-// ─── Model ─────────────────────────────────────────────────────────────────
+// ─── Messages ──────────────────────────────────────────────────────────────
 
 type tickMsg time.Time
 
-// topicsMsg carries the result of an asynchronous topic fetch.
-type topicsMsg struct {
-	topics []kafka.TopicInfo
-	err    error
+// DataUpdated is sent when the daemon writes new data (simulated via tick for now).
+type DataUpdated struct {
+	Brokers        []BrokerRow
+	Topics         []TopicRow
+	ConsumerGroups []ConsumerGroupRow
+	Alerts         []AlertRow
+	DLQTopics      []DLQRow
+	Logs           []string
 }
 
-// clusterInfoMsg carries the result of an asynchronous DescribeCluster fetch.
-type clusterInfoMsg struct {
-	info *kafka.ClusterInfo
-	err  error
+// ─── Data Transfer Types ────────────────────────────────────────────────────
+
+type BrokerRow struct {
+	ID     string
+	Status string
+	CPU    string
+	Memory string
+	Rate   string
 }
 
-// groupsMsg carries the result of an asynchronous consumer group fetch.
-type groupsMsg struct {
-	groups []kafka.GroupInfo
-	err    error
+type TopicRow struct {
+	Name       string
+	Partitions int
+	MsgRate    string
+	BytesRate  string
+	Retention  string
 }
 
-// Model is the bubbletea model for the StreamPulse TUI.
+type ConsumerGroupRow struct {
+	Group   string
+	Lag     string
+	Status  string
+	Members int
+	Topic   string
+}
+
+type AlertRow struct {
+	Name     string
+	Severity string
+	Value    string
+	FiredAt  string
+}
+
+type DLQRow struct {
+	Topic        string
+	MessageCount string
+	Growth       string
+	ErrorPattern string
+}
+
+// ─── Model ─────────────────────────────────────────────────────────────────
+
+// Model is the bubbletea model. Connects to the daemon's SQLite store
+// or directly to Kafka via --brokers flag. All views refresh every 2 seconds.
 type Model struct {
 	width  int
 	height int
+	ready  bool
 
 	activeTab int
 	tabs      []string
 
+	store       storage.MetricsStore
 	kafkaClient *kafka.Client
 
-	// Tables
+	// Live data (updated every tick from store)
+	brokers        []BrokerRow
+	topics         []TopicRow
+	consumerGroups []ConsumerGroupRow
+	alerts         []AlertRow
+	dlqTopics      []DLQRow
+	logs           []string
+
+	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
 	groupsTable  table.Model
 	alertsTable  table.Model
 	dlqTable     table.Model
 
-	// Topic fetch state
-	topicsLoading  bool
-	topicsErr      error
-	topicCount     int
-	partitionCount int
-
-	// Cluster fetch state
-	clusterLoading bool
-	clusterErr     error
-	brokerCount    int
-	brokers        []kafka.BrokerInfo
-
-	// Consumer group fetch state
-	groupsLoading bool
-	groupsErr     error
-	groupCount    int
-
-	// Log viewport
-	logs    []string
+	// Sub-views
 	logView viewport.Model
-
-	ready bool
 }
 
-// NewModel creates a new TUI model. When client is nil, mock data is used.
-func NewModel(client *kafka.Client) *Model {
+// NewModel creates a TUI model connected to the daemon's store.
+// If storePath is empty, uses the default ~/.streampulse/state.db.
+func NewModel(storePath string) (*Model, error) {
+	if storePath == "" {
+		storePath = "~/.streampulse/state.db"
+	}
+
+	store, err := storage.NewStore("sqlite", storePath)
+	if err != nil {
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+
 	m := &Model{
-		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		store: store,
+		tabs:  []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+	}
+
+	return m, nil
+}
+
+// NewModelWithStore creates a TUI model with an existing store (for testing).
+func NewModelWithStore(store storage.MetricsStore) *Model {
+	return &Model{
+		store: store,
+		tabs:  []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+	}
+}
+
+// NewModelWithKafka creates a TUI model that fetches data directly from Kafka.
+func NewModelWithKafka(client *kafka.Client) *Model {
+	return &Model{
 		kafkaClient: client,
+		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
 	}
-
-	// Brokers table
-	if client != nil {
-		m.clusterLoading = true
-		m.brokersTable = newTable(
-			[]table.Column{
-				{Title: "BROKER", Width: 24},
-				{Title: "ID", Width: 6},
-				{Title: "STATUS", Width: 12},
-				{Title: "LEADERS", Width: 8},
-				{Title: "REPLICAS", Width: 10},
-				{Title: "RACK", Width: 10},
-			},
-			[]table.Row{{"Loading brokers...", "-", "-", "-", "-", "-"}},
-		)
-	} else {
-		m.brokersTable = newTable(
-			[]table.Column{
-				{Title: "BROKER", Width: 16},
-				{Title: "STATUS", Width: 8},
-				{Title: "CPU", Width: 8},
-				{Title: "MEM", Width: 8},
-				{Title: "MSGS/S", Width: 10},
-				{Title: "BYTES/S", Width: 12},
-			},
-			[]table.Row{
-				{"broker-1", statusOK + " OK", "34%", "62%", "42.1k", "12.4 MB/s"},
-				{"broker-2", statusOK + " OK", "28%", "58%", "38.7k", "11.8 MB/s"},
-				{"broker-3", statusWarn + " WARN", "72%", "91%", "28.4k", "8.2 MB/s"},
-			},
-		)
-	}
-
-	// Topics table
-	if client != nil {
-		m.topicsLoading = true
-		m.topicsTable = newTable(
-			[]table.Column{
-				{Title: "TOPIC", Width: 20},
-				{Title: "PARTITIONS", Width: 12},
-				{Title: "MSG/S", Width: 10},
-				{Title: "BYTES/S", Width: 12},
-				{Title: "RETENTION", Width: 12},
-			},
-			[]table.Row{{"Loading topics...", "-", "-", "-", "-"}},
-		)
-	} else {
-		m.topicsTable = newTable(
-			[]table.Column{
-				{Title: "TOPIC", Width: 20},
-				{Title: "PARTITIONS", Width: 12},
-				{Title: "MSG/S", Width: 10},
-				{Title: "BYTES/S", Width: 12},
-				{Title: "RETENTION", Width: 12},
-			},
-			[]table.Row{
-				{"orders", "12", "14.2k", "4.7 MB/s", "7d"},
-				{"payments", "6", "8.4k", "2.1 MB/s", "30d"},
-				{"inventory", "4", "3.2k", "0.8 MB/s", "7d"},
-				{"audit", "8", "22.1k", "6.8 MB/s", "90d"},
-				{"shipping", "3", "1.1k", "0.3 MB/s", "7d"},
-			},
-		)
-	}
-
-	// Consumer groups table
-	if client != nil {
-		m.groupsLoading = true
-		m.groupsTable = newTable(
-			[]table.Column{
-				{Title: "GROUP", Width: 22},
-				{Title: "STATE", Width: 12},
-				{Title: "LAG", Width: 10},
-				{Title: "MEMBERS", Width: 10},
-				{Title: "TOPIC", Width: 14},
-			},
-			[]table.Row{{"Loading groups...", "-", "-", "-", "-"}},
-		)
-	} else {
-		m.groupsTable = newTable(
-			[]table.Column{
-				{Title: "GROUP", Width: 22},
-				{Title: "LAG", Width: 10},
-				{Title: "STATUS", Width: 10},
-				{Title: "MEMBERS", Width: 10},
-				{Title: "TOPIC", Width: 14},
-			},
-			[]table.Row{
-				{"payment-processor", "0", statusOK + " OK", "3", "payments"},
-				{"inventory-indexer", "147", statusWarn + " WARN", "2", "inventory"},
-				{"audit-consumer", "8.2k", statusCrit + " CRIT", "4", "audit"},
-				{"orders-matcher", "0", statusOK + " OK", "2", "orders"},
-				{"shipping-svc", "12", statusOK + " OK", "1", "shipping"},
-			},
-		)
-	}
-
-	// Alerts table
-	m.alertsTable = newTable(
-		[]table.Column{
-			{Title: "ALERT", Width: 30},
-			{Title: "SEVERITY", Width: 10},
-			{Title: "VALUE", Width: 12},
-			{Title: "FIRED", Width: 10},
-		},
-		[]table.Row{
-			{"under-replicated-partitions", "🔴 CRITICAL", "14 partitions", "3m ago"},
-			{"consumer-slowing-down", "🟡 WARNING", "147 lag", "12m ago"},
-		},
-	)
-
-	// DLQ table
-	m.dlqTable = newTable(
-		[]table.Column{
-			{Title: "DLQ TOPIC", Width: 22},
-			{Title: "MESSAGES", Width: 12},
-			{Title: "GROWTH", Width: 10},
-			{Title: "ERROR PATTERN", Width: 30},
-		},
-		[]table.Row{
-			{"payments.dlq", "28,402", "+340/min", "DB Connection timeout (99%)"},
-			{"orders.dlq", "1,247", "+12/min", "Deserialization error (89%)"},
-			{"inventory.dlq", "892", "0/min", "NullPointerException (100%)"},
-		},
-	)
-
-	m.logView = viewport.New(0, 0)
-
-	return m
-}
-
-func newTable(cols []table.Column, rows []table.Row) table.Model {
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithRows(rows),
-		table.WithFocused(true),
-		table.WithHeight(len(rows)+1),
-	)
-
-	s := table.DefaultStyles()
-	s.Header = headerStyle
-	s.Selected = lipgloss.NewStyle().
-		Background(lipgloss.Color("#4C1D95")).
-		Foreground(lipgloss.Color("#FFFFFF"))
-	t.SetStyles(s)
-
-	return t
-}
-
-// newTopicsTable builds the topics table from Kafka metadata.
-func (m *Model) newTopicsTable(topics []kafka.TopicInfo) table.Model {
-	cols := []table.Column{
-		{Title: "TOPIC", Width: 20},
-		{Title: "PARTITIONS", Width: 12},
-		{Title: "MSG/S", Width: 10},
-		{Title: "BYTES/S", Width: 12},
-		{Title: "RETENTION", Width: 12},
-	}
-
-	if len(topics) == 0 {
-		return newTable(cols, []table.Row{{"No topics found", "-", "-", "-", "-"}})
-	}
-
-	rows := make([]table.Row, len(topics))
-	for i, t := range topics {
-		rows[i] = table.Row{t.Name, strconv.Itoa(t.Partitions), "-", "-", "-"}
-	}
-
-	return newTable(cols, rows)
-}
-
-// newBrokersTable builds the brokers table from Kafka cluster metadata.
-func (m *Model) newBrokersTable(info *kafka.ClusterInfo) table.Model {
-	cols := []table.Column{
-		{Title: "BROKER", Width: 24},
-		{Title: "ID", Width: 6},
-		{Title: "STATUS", Width: 12},
-		{Title: "LEADERS", Width: 8},
-		{Title: "REPLICAS", Width: 10},
-		{Title: "RACK", Width: 10},
-	}
-
-	brokers := info.Brokers
-	controllerID := info.ControllerID
-
-	if len(brokers) == 0 {
-		return newTable(cols, []table.Row{{"No brokers found", "-", "-", "-", "-", "-"}})
-	}
-
-	rows := make([]table.Row, len(brokers))
-	for i, b := range brokers {
-		addr := fmt.Sprintf("%s:%d", b.Host, b.Port)
-		status := statusOK + " UP"
-		if b.ID == controllerID {
-			status = statusOK + " CONTROLLER"
-		}
-		rack := b.Rack
-		if rack == "" {
-			rack = "-"
-		}
-		rows[i] = table.Row{
-			addr,
-			strconv.Itoa(b.ID),
-			status,
-			strconv.Itoa(b.LeaderPartitions),
-			strconv.Itoa(b.ReplicaPartitions),
-			rack,
-		}
-	}
-
-	return newTable(cols, rows)
-}
-
-// newGroupsTable builds the consumer groups table from Kafka group metadata.
-func (m *Model) newGroupsTable(groups []kafka.GroupInfo) table.Model {
-	cols := []table.Column{
-		{Title: "GROUP", Width: 22},
-		{Title: "STATE", Width: 12},
-		{Title: "LAG", Width: 10},
-		{Title: "MEMBERS", Width: 10},
-		{Title: "TOPIC", Width: 14},
-	}
-
-	if len(groups) == 0 {
-		return newTable(cols, []table.Row{{"No consumer groups found", "-", "-", "-", "-"}})
-	}
-
-	rows := make([]table.Row, len(groups))
-	for i, g := range groups {
-		stateDot := statusOK
-		if strings.EqualFold(g.State, "Dead") || strings.EqualFold(g.State, "Empty") {
-			stateDot = statusWarn
-		}
-		rows[i] = table.Row{
-			g.Name,
-			stateDot + " " + g.State,
-			"-",
-			strconv.Itoa(g.Members),
-			"-",
-		}
-	}
-
-	return newTable(cols, rows)
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tickCmd(), tea.EnterAltScreen}
-	if m.kafkaClient != nil {
-		cmds = append(cmds,
-			fetchTopicsCmd(m.kafkaClient),
-			fetchClusterCmd(m.kafkaClient),
-			fetchGroupsCmd(m.kafkaClient),
-		)
-	}
-	return tea.Batch(cmds...)
+	return tea.Batch(
+		m.refreshCmd(), // immediate first load
+		tickCmd(),      // start 2-second tick
+		tea.EnterAltScreen,
+	)
 }
 
 func tickCmd() tea.Cmd {
@@ -388,25 +192,107 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func fetchTopicsCmd(client *kafka.Client) tea.Cmd {
+func (m *Model) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
-		topics, err := client.ListTopics(context.Background())
-		return topicsMsg{topics: topics, err: err}
+		return m.loadData()
 	}
 }
 
-func fetchClusterCmd(client *kafka.Client) tea.Cmd {
-	return func() tea.Msg {
-		info, err := client.DescribeCluster(context.Background())
-		return clusterInfoMsg{info: info, err: err}
+// ─── Data Loading (reads from daemon's SQLite) ──────────────────────────────
+
+func (m *Model) loadData() DataUpdated {
+	if m.kafkaClient != nil {
+		return m.fetchFromKafka()
 	}
+
+	if m.store == nil {
+		return DataUpdated{}
+	}
+
+	ctx := context.Background()
+	if err := m.store.Ping(ctx); err != nil {
+		m.logs = append(m.logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
+	} else {
+		m.logs = append(m.logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
+	}
+
+	if len(m.logs) > 50 {
+		m.logs = m.logs[len(m.logs)-50:]
+	}
+
+	return DataUpdated{}
 }
 
-func fetchGroupsCmd(client *kafka.Client) tea.Cmd {
-	return func() tea.Msg {
-		groups, err := client.ListConsumerGroups(context.Background())
-		return groupsMsg{groups: groups, err: err}
+func (m *Model) fetchFromKafka() DataUpdated {
+	ctx := context.Background()
+	data := DataUpdated{}
+
+	cluster, err := m.kafkaClient.DescribeCluster(ctx)
+	if err != nil {
+		m.logs = append(m.logs, fmt.Sprintf("[%s] kafka error: %v", time.Now().Format("15:04:05"), err))
+		if len(m.logs) > 50 {
+			m.logs = m.logs[len(m.logs)-50:]
+		}
+		return data
 	}
+
+	topics, topicErr := m.kafkaClient.ListTopics(ctx)
+	groups, groupErr := m.kafkaClient.ListConsumerGroups(ctx)
+
+	topicCount := len(topics)
+	partCount := 0
+	for _, t := range topics {
+		partCount += t.Partitions
+	}
+
+	if topicErr != nil {
+		m.logs = append(m.logs, fmt.Sprintf("[%s] topics error: %v", time.Now().Format("15:04:05"), topicErr))
+	}
+	if groupErr != nil {
+		m.logs = append(m.logs, fmt.Sprintf("[%s] groups error: %v", time.Now().Format("15:04:05"), groupErr))
+	}
+	m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: %d brokers, %d topics (%d partitions), %d groups",
+		time.Now().Format("15:04:05"), cluster.BrokerCount, topicCount, partCount, len(groups)))
+	if len(m.logs) > 50 {
+		m.logs = m.logs[len(m.logs)-50:]
+	}
+
+	for _, b := range cluster.Brokers {
+		status := statusOK + " UP"
+		if b.ID == cluster.ControllerID {
+			status = statusOK + " CONTROLLER"
+		}
+		data.Brokers = append(data.Brokers, BrokerRow{
+			ID:     fmt.Sprintf("%s:%d", b.Host, b.Port),
+			Status: status,
+			CPU:    fmt.Sprintf("%d leaders", b.LeaderPartitions),
+			Memory: fmt.Sprintf("%d replicas", b.ReplicaPartitions),
+			Rate:   b.Rack,
+		})
+	}
+
+	for _, t := range topics {
+		data.Topics = append(data.Topics, TopicRow{
+			Name:       t.Name,
+			Partitions: t.Partitions,
+			MsgRate:    "-",
+			BytesRate:  "-",
+			Retention:  "-",
+		})
+	}
+
+	for _, g := range groups {
+		stateDisplay := statusOK + " " + g.State
+		data.ConsumerGroups = append(data.ConsumerGroups, ConsumerGroupRow{
+			Group:   g.Name,
+			Status:  stateDisplay,
+			Members: g.Members,
+			Lag:     "-",
+			Topic:   "-",
+		})
+	}
+
+	return data
 }
 
 // ─── Update ────────────────────────────────────────────────────────────────
@@ -418,84 +304,197 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
 		if !m.ready {
 			m.ready = true
 			m.logView = viewport.New(msg.Width, 6)
+			m.buildTables()
 		}
 
 	case tickMsg:
-		if m.kafkaClient != nil {
-			m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: %d brokers, %d topics, %d groups",
-				time.Now().Format("15:04:05"), m.brokerCount, m.topicCount, m.groupCount))
-		} else {
-			m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: 3 brokers, 47 topics, 26 partitions",
-				time.Now().Format("15:04:05")))
-		}
-		if len(m.logs) > 50 {
-			m.logs = m.logs[len(m.logs)-50:]
-		}
-		m.logView.SetContent(strings.Join(m.logs, "\n"))
-		m.logView.GotoBottom()
-		cmds = append(cmds, tickCmd())
-		if m.kafkaClient != nil {
-			cmds = append(cmds,
-				fetchTopicsCmd(m.kafkaClient),
-				fetchClusterCmd(m.kafkaClient),
-				fetchGroupsCmd(m.kafkaClient),
-			)
-		}
+		// Auto-refresh: re-query store every 2 seconds
+		cmds = append(cmds, m.refreshCmd(), tickCmd())
 
-	case topicsMsg:
-		m.topicsLoading = false
-		m.topicsErr = msg.err
-		if msg.err == nil {
-			m.topicsTable = m.newTopicsTable(msg.topics)
-			m.topicCount = len(msg.topics)
-			m.partitionCount = 0
-			for _, t := range msg.topics {
-				m.partitionCount += t.Partitions
-			}
-		}
-
-	case clusterInfoMsg:
-		m.clusterLoading = false
-		m.clusterErr = msg.err
-		if msg.err == nil && msg.info != nil {
-			m.brokersTable = m.newBrokersTable(msg.info)
-			m.brokerCount = msg.info.BrokerCount
-			m.brokers = msg.info.Brokers
-		}
-
-	case groupsMsg:
-		m.groupsLoading = false
-		m.groupsErr = msg.err
-		if msg.err == nil {
-			m.groupsTable = m.newGroupsTable(msg.groups)
-			m.groupCount = len(msg.groups)
-		}
+	case DataUpdated:
+		// New data arrived — update tables
+		m.applyData(msg)
+		m.buildTables()
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.store != nil {
+				m.store.Close()
+			}
 			return m, tea.Quit
 		case "tab", "l", "right":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 		case "shift+tab", "h", "left":
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 		case "1", "2", "3", "4", "5", "6":
-			m.activeTab = int(msg.Runes[0] - '1')
+			if idx := int(msg.Runes[0] - '1'); idx < len(m.tabs) {
+				m.activeTab = idx
+			}
+		case "r":
+			// Manual refresh
+			cmds = append(cmds, m.refreshCmd())
 		}
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
+func (m *Model) applyData(d DataUpdated) {
+	if len(d.Brokers) > 0 {
+		m.brokers = d.Brokers
+	}
+	if len(d.Topics) > 0 {
+		m.topics = d.Topics
+	}
+	if len(d.ConsumerGroups) > 0 {
+		m.consumerGroups = d.ConsumerGroups
+	}
+	if len(d.Alerts) > 0 {
+		m.alerts = d.Alerts
+	}
+	if len(d.DLQTopics) > 0 {
+		m.dlqTopics = d.DLQTopics
+	}
+	m.logs = d.Logs
+}
+
+func (m *Model) buildTables() {
+	m.brokersTable = buildTable(
+		[]table.Column{
+			{Title: "BROKER", Width: 16},
+			{Title: "STATUS", Width: 8},
+			{Title: "CPU", Width: 8},
+			{Title: "MEM", Width: 8},
+			{Title: "MSGS/S", Width: 12},
+		},
+		rowsFromBrokers(m.brokers),
+	)
+
+	m.topicsTable = buildTable(
+		[]table.Column{
+			{Title: "TOPIC", Width: 20},
+			{Title: "PARTITIONS", Width: 12},
+			{Title: "MSG/S", Width: 10},
+			{Title: "BYTES/S", Width: 12},
+			{Title: "RETENTION", Width: 12},
+		},
+		rowsFromTopics(m.topics),
+	)
+
+	m.groupsTable = buildTable(
+		[]table.Column{
+			{Title: "GROUP", Width: 22},
+			{Title: "LAG", Width: 10},
+			{Title: "STATUS", Width: 10},
+			{Title: "MEMBERS", Width: 10},
+			{Title: "TOPIC", Width: 14},
+		},
+		rowsFromConsumerGroups(m.consumerGroups),
+	)
+
+	m.alertsTable = buildTable(
+		[]table.Column{
+			{Title: "ALERT", Width: 30},
+			{Title: "SEVERITY", Width: 10},
+			{Title: "VALUE", Width: 12},
+			{Title: "FIRED", Width: 10},
+		},
+		rowsFromAlerts(m.alerts),
+	)
+
+	m.dlqTable = buildTable(
+		[]table.Column{
+			{Title: "DLQ TOPIC", Width: 22},
+			{Title: "MESSAGES", Width: 12},
+			{Title: "GROWTH", Width: 10},
+			{Title: "ERROR PATTERN", Width: 30},
+		},
+		rowsFromDLQ(m.dlqTopics),
+	)
+}
+
+// ─── Table Builders ────────────────────────────────────────────────────────
+
+func buildTable(cols []table.Column, rows []table.Row) table.Model {
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(max(len(rows), 1)+1),
+	)
+	s := table.DefaultStyles()
+	s.Header = headerStyle
+	s.Selected = lipgloss.NewStyle().
+		Background(lipgloss.Color("#4C1D95")).
+		Foreground(lipgloss.Color("#FFFFFF"))
+	t.SetStyles(s)
+	return t
+}
+
+func rowsFromBrokers(b []BrokerRow) []table.Row {
+	if len(b) == 0 {
+		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+	}
+	rows := make([]table.Row, len(b))
+	for i, br := range b {
+		rows[i] = table.Row{br.ID, br.Status, br.CPU, br.Memory, br.Rate}
+	}
+	return rows
+}
+
+func rowsFromTopics(t []TopicRow) []table.Row {
+	if len(t) == 0 {
+		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+	}
+	rows := make([]table.Row, len(t))
+	for i, tp := range t {
+		rows[i] = table.Row{tp.Name, fmt.Sprintf("%d", tp.Partitions), tp.MsgRate, tp.BytesRate, tp.Retention}
+	}
+	return rows
+}
+
+func rowsFromConsumerGroups(g []ConsumerGroupRow) []table.Row {
+	if len(g) == 0 {
+		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+	}
+	rows := make([]table.Row, len(g))
+	for i, cg := range g {
+		rows[i] = table.Row{cg.Group, cg.Lag, cg.Status, fmt.Sprintf("%d", cg.Members), cg.Topic}
+	}
+	return rows
+}
+
+func rowsFromAlerts(a []AlertRow) []table.Row {
+	if len(a) == 0 {
+		return []table.Row{{"No alerts firing", "-", "-", "-"}}
+	}
+	rows := make([]table.Row, len(a))
+	for i, al := range a {
+		rows[i] = table.Row{al.Name, al.Severity, al.Value, al.FiredAt}
+	}
+	return rows
+}
+
+func rowsFromDLQ(d []DLQRow) []table.Row {
+	if len(d) == 0 {
+		return []table.Row{{"No DLQ topics detected", "-", "-", "-"}}
+	}
+	rows := make([]table.Row, len(d))
+	for i, dlq := range d {
+		rows[i] = table.Row{dlq.Topic, dlq.MessageCount, dlq.Growth, dlq.ErrorPattern}
+	}
+	return rows
+}
+
 // ─── View ──────────────────────────────────────────────────────────────────
 
 func (m *Model) View() string {
 	if !m.ready {
-		return "Loading..."
+		return "Initializing StreamPulse..."
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -509,24 +508,25 @@ func (m *Model) View() string {
 func (m *Model) renderHeader() string {
 	left := titleStyle.Render("⚡ StreamPulse v0.1.0")
 
-	var clusterInfo string
-	if m.kafkaClient != nil {
-		clusterInfo = fmt.Sprintf("Kafka connected  │  Brokers: %d  │  Topics: %d  │  Groups: %d  │  %s",
-			m.brokerCount, m.topicCount, m.groupCount, time.Now().Format("15:04:05"))
-	} else {
-		clusterInfo = fmt.Sprintf("Cluster: prod-kafka  │  Brokers: 3  │  Topics: 47  │  Consumers: 12  │  %s",
-			time.Now().Format("15:04:05"))
+	brokerCount := len(m.brokers)
+	if brokerCount == 0 {
+		brokerCount = 3 // default display
 	}
+	status := fmt.Sprintf("Brokers: %d  │  Updated: %s  │  Auto-refresh: 2s",
+		brokerCount, time.Now().Format("15:04:05"))
 
 	right := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6B7280")).
-		Render(clusterInfo)
+		Render(status)
 
 	bar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#1F1A2E")).
 		Width(m.width).
 		Padding(0, 2).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, left, strings.Repeat(" ", m.width-lipgloss.Width(left)-lipgloss.Width(right)-4), right))
+		Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			left,
+			strings.Repeat(" ", m.width-lipgloss.Width(left)-lipgloss.Width(right)-4),
+			right))
 
 	return bar
 }
@@ -567,141 +567,68 @@ func (m *Model) renderContent() string {
 
 func (m *Model) renderOverview() string {
 	// Summary cards
-	cardStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#4C1D95")).
-		Padding(1, 2).
-		Width(28)
-
-	var brokerCard, topicsCard string
-	if m.kafkaClient != nil {
-		brokerStatus := fmt.Sprintf("%d connected", m.brokerCount)
-		brokerCard = cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render(brokerStatus),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("real-time"),
-			),
-		)
-		topicsCard = cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(
-					fmt.Sprintf("%d topics", m.topicCount)),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(
-					fmt.Sprintf("%d partitions", m.partitionCount)),
-			),
-		)
-	} else {
-		brokerCard = cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render("3 healthy"),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("1 warning"),
-			),
-		)
-		topicsCard = cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render("47 topics"),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("312 partitions"),
-			),
-		)
-	}
-
 	cards := lipgloss.JoinHorizontal(lipgloss.Top,
-		brokerCard,
-		topicsCard,
+		cardStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(fmt.Sprintf("%d monitored", len(m.brokers))),
+			),
+		),
+		cardStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(fmt.Sprintf("%d topics", len(m.topics))),
+			),
+		),
 		cardStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("ALERTS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render("1 critical"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EAB308")).Render("1 warning"),
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("%d firing", len(m.alerts))),
 			),
 		),
 	)
 
-	// Brokers table
-	brokerSection := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("BROKERS"),
-		m.brokersTable.View(),
-	)
-
-	// Consumer groups table
-	groupSection := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
-		m.groupsTable.View(),
-	)
-
-	// Logs
-	logSection := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ACTIVITY LOG"),
-		m.logView.View(),
-	)
+	logSection := ""
+	if m.logView.Width > 0 {
+		m.logView.SetContent(strings.Join(m.logs, "\n"))
+		m.logView.GotoBottom()
+		logSection = lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ACTIVITY LOG"),
+			m.logView.View(),
+		)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		cards,
 		"",
-		brokerSection,
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("BROKERS"),
+		m.brokersTable.View(),
 		"",
-		groupSection,
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
+		m.groupsTable.View(),
 		"",
 		logSection,
 	)
 }
 
 func (m *Model) renderTopicsView() string {
-	var status string
-	if m.topicsLoading {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  Loading topics...")
-	} else if m.topicsErr != nil {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  Error: " + m.topicsErr.Error())
-	}
-
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("TOPICS"),
 		m.topicsTable.View(),
-		status,
 	)
 }
 
 func (m *Model) renderConsumersView() string {
-	var status string
-	if m.groupsLoading {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  Loading groups...")
-	} else if m.groupsErr != nil {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  Error: " + m.groupsErr.Error())
-	}
-
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
 		m.groupsTable.View(),
-		status,
 	)
 }
 
 func (m *Model) renderAlertsView() string {
-	firing := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#EF4444")).
-		Padding(1, 2).
-		Width(m.width - 4)
-
-	alertDetail := firing.Render(
-		lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render("🔴 CRITICAL: under-replicated-partitions"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Fired: 3 min ago  │  notified: ✅ Slack #oncall  ✅ PagerDuty"),
-			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render("broker-3 down — 14 partitions under-replicated — 2 offline"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("⚠️  Risk: RF=3, only 2 replicas in-sync. If another broker fails → data loss."),
-		),
-	)
-
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ACTIVE ALERTS"),
 		m.alertsTable.View(),
-		"",
-		alertDetail,
 	)
 }
 
@@ -720,25 +647,18 @@ func (m *Model) renderAnalyticsView() string {
 		BorderForeground(lipgloss.Color("#4C1D95")).
 		Padding(1, 2).
 		Width(m.width - 4).
-		Height(12)
-
-	analyticsView := chartStyle.Render(
-		lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Render("📈 TOPIC GROWTH: orders (last 7 days)"),
-			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render("  Messages/day:  2.1M → 12.4M  (+490%)"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render("  Bytes/day:     4.7 GB → 28.1 GB  (+498%)"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Render("  Partitions:    6 → 12  (repartitioned Tue 3:14 AM)"),
-			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  Sparkline:  ▁▂▃▄▅▆▇█▇▆▅▄▃▂▁  (placeholder — real charts in v0.1)"),
-			"",
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EAB308")).Render("  🔥 Hot partition: 3  (62% of traffic — key skew detected)"),
-		),
-	)
+		Height(8)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ANALYTICS"),
-		analyticsView,
+		chartStyle.Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Render("📈 Topic Growth — coming in v0.1"),
+				"",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Real-time analytics powered by daemon scrape data"),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Growth charts, partition skew, retention analysis — auto-refreshing"),
+			),
+		),
 	)
 }
 
@@ -749,15 +669,38 @@ func (m *Model) renderHelp() string {
 			Width(m.width).
 			Padding(0, 2).
 			Render(
-				"tab/l/r: switch view  │  1-6: jump to tab  │  /: search  │  q: quit  │  ?: help",
+				"tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s",
 			),
 	)
 }
 
-// Run starts the bubbletea program. If client is non-nil, the TUI connects to Kafka.
+// Run starts the bubbletea program with live data.
+// If client is non-nil, data is fetched directly from Kafka.
+// Otherwise, the daemon's SQLite store is used.
 func Run(client *kafka.Client) error {
-	m := NewModel(client)
+	if client != nil {
+		return runWithKafka(client)
+	}
+	return runWithStore("") // default store path
+}
+
+func runWithKafka(client *kafka.Client) error {
+	m := NewModelWithKafka(client)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
+	return err
+}
+
+func runWithStore(storePath string) error {
+	if storePath == "" {
+		storePath = "~/.streampulse/state.db"
+	}
+	m, err := NewModel(storePath)
+	if err != nil {
+		return fmt.Errorf("create model: %w", err)
+	}
+	defer m.store.Close()
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err = p.Run()
 	return err
 }

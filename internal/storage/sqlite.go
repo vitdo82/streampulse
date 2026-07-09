@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go SQLite driver
@@ -16,9 +19,21 @@ type SQLiteStore struct {
 
 // NewSQLiteStore creates a new SQLite-backed store.
 func NewSQLiteStore(dsn string) (*SQLiteStore, error) {
-	// Default path if none provided
 	if dsn == "" {
 		dsn = "~/.streampulse/state.db"
+	}
+
+	if strings.HasPrefix(dsn, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("home dir: %w", err)
+		}
+		dsn = filepath.Join(home, dsn[2:])
+	}
+
+	dir := filepath.Dir(dsn)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create directory %s: %w", dir, err)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
