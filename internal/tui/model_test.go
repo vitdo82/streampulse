@@ -161,6 +161,16 @@ func TestHeaderShowsPlaceholderBeforeFirstUpdate(t *testing.T) {
 	}
 }
 
+func TestFailedFetchDoesNotStampLastUpdated(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}})
+	before := m.lastUpdated
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] kafka error"}})
+	if !m.lastUpdated.Equal(before) {
+		t.Errorf("failed fetch must not change lastUpdated: before=%v after=%v", before, m.lastUpdated)
+	}
+}
+
 func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
 	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
 	m.Init()

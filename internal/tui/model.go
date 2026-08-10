@@ -360,12 +360,12 @@ func (m *Model) applyData(d DataUpdated) {
 		m.consumerGroups = d.ConsumerGroups
 		m.alerts = d.Alerts
 		m.dlqTopics = d.DLQTopics
+		m.lastUpdated = time.Now()
 	}
 	m.logs = append(m.logs, d.Logs...)
 	if len(m.logs) > 50 {
 		m.logs = m.logs[len(m.logs)-50:]
 	}
-	m.lastUpdated = time.Now()
 }
 
 func (m *Model) buildTables() {
