@@ -17,11 +17,27 @@ import (
 // Client wraps the kafka-go connection for admin and consumer operations.
 type Client struct {
 	brokers []string
+
+	dialer      *kafka.Dialer
+	adminClient *kafka.Client
+	transport   *kafka.Transport
 }
 
 // NewClient creates a new Kafka client.
 func NewClient(brokers []string) *Client {
-	return &Client{brokers: brokers}
+	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
+	transport := &kafka.Transport{Dial: dialer.DialFunc}
+	return &Client{
+		brokers:     brokers,
+		dialer:      dialer,
+		transport:   transport,
+		adminClient: &kafka.Client{Transport: transport},
+	}
+}
+
+// Close releases the transport's connection pool and background goroutines.
+func (c *Client) Close() {
+	c.transport.CloseIdleConnections()
 }
 
 // Ping checks connectivity to the Kafka cluster.
@@ -123,20 +139,16 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 		return nil, fmt.Errorf("no brokers configured")
 	}
 
-	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
-	transport := &kafka.Transport{Dial: dialer.DialFunc}
-	client := &kafka.Client{Transport: transport}
-
 	var errs []error
 	for _, b := range c.brokers {
-		conn, err := dialer.DialContext(ctx, "tcp", b)
+		conn, err := c.dialer.DialContext(ctx, "tcp", b)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", b, err))
 			continue
 		}
 		conn.Close()
 
-		groups, err := groupsFromBroker(ctx, client, transport, kafka.TCP(b))
+		groups, err := c.groupsFromBroker(ctx, kafka.TCP(b))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", b, err))
 			continue
@@ -149,8 +161,8 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 // groupsFromBroker lists and describes consumer groups through one broker.
 // DescribeGroups uses the protocol package directly (not kafka.Client), because
 // kafka-go's client wrapper fails to decode member metadata from modern consumers.
-func groupsFromBroker(ctx context.Context, client *kafka.Client, transport *kafka.Transport, addr net.Addr) ([]GroupInfo, error) {
-	listResp, err := client.ListGroups(ctx, &kafka.ListGroupsRequest{Addr: addr})
+func (c *Client) groupsFromBroker(ctx context.Context, addr net.Addr) ([]GroupInfo, error) {
+	listResp, err := c.adminClient.ListGroups(ctx, &kafka.ListGroupsRequest{Addr: addr})
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
@@ -166,7 +178,7 @@ func groupsFromBroker(ctx context.Context, client *kafka.Client, transport *kafk
 		ids = append(ids, g.GroupID)
 	}
 
-	raw, err := transport.RoundTrip(ctx, addr, &describegroups.Request{Groups: ids})
+	raw, err := c.transport.RoundTrip(ctx, addr, &describegroups.Request{Groups: ids})
 	if err != nil {
 		return nil, fmt.Errorf("describe groups: %w", err)
 	}
@@ -213,10 +225,9 @@ func (c *Client) dial(ctx context.Context) (*kafka.Conn, error) {
 		return nil, fmt.Errorf("no brokers configured")
 	}
 
-	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
 	var errs []error
 	for _, b := range c.brokers {
-		conn, err := dialer.DialContext(ctx, "tcp", b)
+		conn, err := c.dialer.DialContext(ctx, "tcp", b)
 		if err == nil {
 			return conn, nil
 		}

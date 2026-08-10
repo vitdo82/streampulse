@@ -3,7 +3,9 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -111,4 +113,41 @@ func TestPartitionsToTopicsSkipsErroredPartitions(t *testing.T) {
 	require.Len(t, topics, 1)
 	assert.Equal(t, "orders", topics[0].Name)
 	assert.Equal(t, 1, topics[0].Partitions)
+}
+
+func TestTransportGoroutinesReleasedOnClose(t *testing.T) {
+	// Dummy broker: accepts TCP connections so the transport creates its pool
+	// and metadata-discover goroutine (an unreachable address never reaches
+	// RoundTrip and would make this test vacuous).
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer l.Close()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	before := runtime.NumGoroutine()
+	for i := 0; i < 2; i++ {
+		c := NewClient([]string{l.Addr().String()})
+		_, _ = c.ListConsumerGroups(context.Background())
+		c.Close()
+	}
+	// Allow background goroutines to unwind.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		if runtime.NumGoroutine() <= before+1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if runtime.NumGoroutine() > before+1 {
+		t.Fatalf("goroutines not released after Close: before=%d after=%d", before, runtime.NumGoroutine())
+	}
 }

@@ -10,6 +10,7 @@ func runTUI(brokers []string) error {
 	var client *kafka.Client
 	if len(brokers) > 0 {
 		client = kafka.NewClient(brokers)
+		defer client.Close()
 	}
 	return tui.Run(client)
 }
