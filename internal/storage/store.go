@@ -3,6 +3,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -90,9 +91,9 @@ func NewStore(storeType, dsn string) (MetricsStore, error) {
 	case "sqlite", "":
 		return NewSQLiteStore(dsn)
 	case "postgres":
-		return nil, nil // TODO: v0.2
+		return nil, fmt.Errorf("storage type %q not implemented (planned for v0.2)", storeType)
 	case "clickhouse":
-		return nil, nil // TODO: v0.3
+		return nil, fmt.Errorf("storage type %q not implemented (planned for v0.3)", storeType)
 	default:
 		return NewSQLiteStore(dsn) // default to SQLite
 	}
