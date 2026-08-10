@@ -699,6 +699,7 @@ func runWithStore(storePath string) error {
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
+	defer m.store.Close() // runWithStore owns the store; closes once on every exit path
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
