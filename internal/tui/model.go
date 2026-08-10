@@ -329,9 +329,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			if m.store != nil {
-				m.store.Close()
-			}
 			return m, tea.Quit
 		case "tab", "l", "right":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
@@ -440,7 +437,7 @@ func buildTable(cols []table.Column, rows []table.Row) table.Model {
 
 func rowsFromBrokers(b []BrokerRow) []table.Row {
 	if len(b) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(b))
 	for i, br := range b {
@@ -451,7 +448,7 @@ func rowsFromBrokers(b []BrokerRow) []table.Row {
 
 func rowsFromTopics(t []TopicRow) []table.Row {
 	if len(t) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(t))
 	for i, tp := range t {
@@ -462,7 +459,7 @@ func rowsFromTopics(t []TopicRow) []table.Row {
 
 func rowsFromConsumerGroups(g []ConsumerGroupRow) []table.Row {
 	if len(g) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(g))
 	for i, cg := range g {
@@ -702,7 +699,6 @@ func runWithStore(storePath string) error {
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
-	defer m.store.Close()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err

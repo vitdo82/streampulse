@@ -66,15 +66,15 @@ func TestTabSwitching(t *testing.T) {
 	}
 }
 
-func TestEmptyTablesShowWaitingState(t *testing.T) {
+func TestEmptyTablesShowNoDataState(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.ready = true
 	m.buildTables()
 
-	// All tables should show waiting/empty state (text may be truncated by column width)
+	// All tables should show an honest empty state (text may be truncated by column width)
 	brokerView := m.brokersTable.View()
-	if !strings.Contains(brokerView, "Waiting for dae") && !strings.Contains(brokerView, "Waiting for daemon") {
-		t.Errorf("empty brokers table should show waiting state, got: %s", brokerView)
+	if !strings.Contains(brokerView, "No data") {
+		t.Errorf("empty brokers table should show no-data state, got: %s", brokerView)
 	}
 
 	alertView := m.alertsTable.View()
@@ -108,6 +108,19 @@ func TestApplyDataAccumulatesLogs(t *testing.T) {
 	m.applyData(DataUpdated{Logs: []string{"[00:00:02] b"}})
 	if len(m.logs) != 2 || m.logs[0] != "[00:00:01] a" || m.logs[1] != "[00:00:02] b" {
 		t.Errorf("logs should accumulate, got %v", m.logs)
+	}
+}
+
+func TestApplyDataClearsStaleData(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}, Topics: []TopicRow{{Name: "t1"}}})
+	if len(m.topics) != 1 {
+		t.Fatalf("expected 1 topic, got %d", len(m.topics))
+	}
+
+	m.applyData(DataUpdated{})
+	if len(m.topics) != 0 || len(m.brokers) != 0 {
+		t.Errorf("empty snapshot should clear stale data, got topics=%d brokers=%d", len(m.topics), len(m.brokers))
 	}
 }
 
