@@ -687,6 +687,7 @@ func (m *Model) renderHelp() string {
 // Run starts the bubbletea program with live data.
 // If client is non-nil, data is fetched directly from Kafka.
 // Otherwise, the daemon's SQLite store is used.
+// The client is borrowed, not closed: callers own it (see cli.runTUI).
 func Run(client *kafka.Client) error {
 	if client != nil {
 		return runWithKafka(client)

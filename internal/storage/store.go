@@ -95,6 +95,6 @@ func NewStore(storeType, dsn string) (MetricsStore, error) {
 	case "clickhouse":
 		return nil, fmt.Errorf("storage type %q not implemented (planned for v0.3)", storeType)
 	default:
-		return NewSQLiteStore(dsn) // default to SQLite
+		return nil, fmt.Errorf("unknown storage type %q", storeType)
 	}
 }

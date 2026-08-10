@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewStoreUnsupportedBackends(t *testing.T) {
-	for _, typ := range []string{"postgres", "clickhouse"} {
+	for _, typ := range []string{"postgres", "clickhouse", "postgress"} {
 		store, err := NewStore(typ, "")
 		require.Error(t, err, typ)
 		assert.Nil(t, store, typ)
