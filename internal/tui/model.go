@@ -64,6 +64,7 @@ type DataUpdated struct {
 	Alerts         []AlertRow
 	DLQTopics      []DLQRow
 	Logs           []string
+	Failed         bool
 }
 
 // ─── Data Transfer Types ────────────────────────────────────────────────────
@@ -229,17 +230,15 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	defer cancel()
 
 	data := DataUpdated{}
-	var logs []string
+	logs := make([]string, 0, 2)
 	logf := func(format string, args ...any) {
 		logs = append(logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
-		if len(logs) > 50 {
-			logs = logs[len(logs)-50:]
-		}
 	}
 
 	cluster, err := m.kafkaClient.DescribeCluster(ctx)
 	if err != nil {
 		logf("kafka error: %v", err)
+		data.Failed = true
 		data.Logs = logs
 		return data
 	}
@@ -258,6 +257,9 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	}
 	if groupErr != nil {
 		logf("groups error: %v", groupErr)
+	}
+	if topicErr != nil || groupErr != nil {
+		data.Failed = true
 	}
 	logf("scrape: %d brokers, %d topics (%d partitions), %d groups",
 		cluster.BrokerCount, topicCount, partCount, len(groups))
@@ -349,12 +351,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyData(d DataUpdated) {
-	m.brokers = d.Brokers
-	m.topics = d.Topics
-	m.consumerGroups = d.ConsumerGroups
-	m.alerts = d.Alerts
-	m.dlqTopics = d.DLQTopics
-	m.logs = d.Logs
+	if !d.Failed {
+		m.brokers = d.Brokers
+		m.topics = d.Topics
+		m.consumerGroups = d.ConsumerGroups
+		m.alerts = d.Alerts
+		m.dlqTopics = d.DLQTopics
+	}
+	m.logs = append(m.logs, d.Logs...)
+	if len(m.logs) > 50 {
+		m.logs = m.logs[len(m.logs)-50:]
+	}
 	m.lastUpdated = time.Now()
 }
 

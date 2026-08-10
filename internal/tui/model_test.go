@@ -101,3 +101,24 @@ func TestFetchFromKafkaLogsErrors(t *testing.T) {
 		t.Errorf("expected kafka error log, got %q", data.Logs[0])
 	}
 }
+
+func TestApplyDataAccumulatesLogs(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Logs: []string{"[00:00:01] a"}})
+	m.applyData(DataUpdated{Logs: []string{"[00:00:02] b"}})
+	if len(m.logs) != 2 || m.logs[0] != "[00:00:01] a" || m.logs[1] != "[00:00:02] b" {
+		t.Errorf("logs should accumulate, got %v", m.logs)
+	}
+}
+
+func TestApplyDataPreservesTablesOnError(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}, Topics: []TopicRow{{Name: "t1"}}})
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] kafka error: boom"}})
+	if len(m.topics) != 1 || len(m.brokers) != 1 {
+		t.Errorf("failed snapshot must not wipe tables, got topics=%d brokers=%d", len(m.topics), len(m.brokers))
+	}
+	if len(m.logs) != 1 || !strings.Contains(m.logs[0], "kafka error") {
+		t.Errorf("logs must still apply on failed snapshot, got %v", m.logs)
+	}
+}
