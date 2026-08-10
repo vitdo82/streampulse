@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol/describegroups"
 )
 
 // Client wraps the kafka-go connection for admin and consumer operations.
@@ -123,7 +124,8 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 	}
 
 	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
-	client := &kafka.Client{Transport: &kafka.Transport{Dial: dialer.DialFunc}}
+	transport := &kafka.Transport{Dial: dialer.DialFunc}
+	client := &kafka.Client{Transport: transport}
 
 	var errs []error
 	for _, b := range c.brokers {
@@ -134,7 +136,7 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 		}
 		conn.Close()
 
-		groups, err := c.groupsFromBroker(ctx, client, kafka.TCP(b))
+		groups, err := groupsFromBroker(ctx, client, transport, kafka.TCP(b))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", b, err))
 			continue
@@ -145,7 +147,9 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 }
 
 // groupsFromBroker lists and describes consumer groups through one broker.
-func (c *Client) groupsFromBroker(ctx context.Context, client *kafka.Client, addr net.Addr) ([]GroupInfo, error) {
+// DescribeGroups uses the protocol package directly (not kafka.Client), because
+// kafka-go's client wrapper fails to decode member metadata from modern consumers.
+func groupsFromBroker(ctx context.Context, client *kafka.Client, transport *kafka.Transport, addr net.Addr) ([]GroupInfo, error) {
 	listResp, err := client.ListGroups(ctx, &kafka.ListGroupsRequest{Addr: addr})
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
@@ -162,14 +166,18 @@ func (c *Client) groupsFromBroker(ctx context.Context, client *kafka.Client, add
 		ids = append(ids, g.GroupID)
 	}
 
-	descResp, err := client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{Addr: addr, GroupIDs: ids})
+	raw, err := transport.RoundTrip(ctx, addr, &describegroups.Request{Groups: ids})
 	if err != nil {
 		return nil, fmt.Errorf("describe groups: %w", err)
 	}
+	resp, ok := raw.(*describegroups.Response)
+	if !ok {
+		return nil, fmt.Errorf("describe groups: unexpected response type %T", raw)
+	}
 
-	groups := make([]GroupInfo, 0, len(descResp.Groups))
-	for _, g := range descResp.Groups {
-		if g.Error != nil {
+	groups := make([]GroupInfo, 0, len(resp.Groups))
+	for _, g := range resp.Groups {
+		if g.ErrorCode != 0 {
 			continue
 		}
 		groups = append(groups, GroupInfo{Name: g.GroupID, State: g.GroupState, Members: len(g.Members)})
