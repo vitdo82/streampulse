@@ -318,11 +318,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
-		// Auto-refresh: re-query store every 2 seconds
-		cmds = append(cmds, m.refreshCmd(), tickCmd())
+		if !m.loading {
+			m.loading = true
+			cmds = append(cmds, m.refreshCmd())
+		}
+		cmds = append(cmds, tickCmd())
 
 	case DataUpdated:
-		// New data arrived — update tables
+		m.loading = false
 		m.applyData(msg)
 		m.buildTables()
 
@@ -339,8 +342,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeTab = idx
 			}
 		case "r":
-			// Manual refresh
-			cmds = append(cmds, m.refreshCmd())
+			if !m.loading {
+				m.loading = true
+				cmds = append(cmds, m.refreshCmd())
+			}
 		}
 	}
 

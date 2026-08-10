@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pulsedev/streampulse/internal/kafka"
 )
@@ -133,5 +134,27 @@ func TestApplyDataPreservesTablesOnError(t *testing.T) {
 	}
 	if len(m.logs) != 1 || !strings.Contains(m.logs[0], "kafka error") {
 		t.Errorf("logs must still apply on failed snapshot, got %v", m.logs)
+	}
+}
+
+func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+
+	tm, _ := m.Update(tickMsg(time.Now()))
+	m = tm.(*Model)
+	if !m.loading {
+		t.Error("expected loading=true after tick dispatched refresh")
+	}
+
+	tm, _ = m.Update(DataUpdated{})
+	m = tm.(*Model)
+	if m.loading {
+		t.Error("expected loading=false after DataUpdated arrived")
+	}
+
+	tm, _ = m.Update(tickMsg(time.Now()))
+	m = tm.(*Model)
+	if !m.loading {
+		t.Error("expected loading=true again after DataUpdated")
 	}
 }
