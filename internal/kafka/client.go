@@ -132,8 +132,8 @@ type GroupInfo struct {
 }
 
 // ListConsumerGroups returns all consumer groups in the cluster.
-// Uses kafka-go's Client (ListGroups + DescribeGroups), which supports
-// SASL/TLS via Dialer configuration and multi-broker failover.
+// Uses kafka-go's Client.ListGroups and the protocol-level DescribeGroups
+// (via transport.RoundTrip), with multi-broker failover.
 func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 	if len(c.brokers) == 0 {
 		return nil, fmt.Errorf("no brokers configured")
