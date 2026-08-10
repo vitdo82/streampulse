@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/pulsedev/streampulse/internal/kafka"
 )
 
 func TestModelInitialization(t *testing.T) {
@@ -78,5 +80,24 @@ func TestEmptyTablesShowWaitingState(t *testing.T) {
 	alertView := m.alertsTable.View()
 	if !strings.Contains(alertView, "No alerts firing") {
 		t.Error("empty alerts table should show 'No alerts firing'")
+	}
+}
+
+func TestApplyDataPopulatesLogs(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Logs: []string{"[00:00:01] store connected"}})
+	if len(m.logs) != 1 || m.logs[0] != "[00:00:01] store connected" {
+		t.Errorf("logs not populated by applyData, got %v", m.logs)
+	}
+}
+
+func TestFetchFromKafkaLogsErrors(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	data := m.fetchFromKafka()
+	if len(data.Logs) == 0 {
+		t.Fatal("expected error log from unreachable broker")
+	}
+	if !strings.Contains(data.Logs[0], "kafka error") {
+		t.Errorf("expected kafka error log, got %q", data.Logs[0])
 	}
 }

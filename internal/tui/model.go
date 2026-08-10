@@ -129,6 +129,9 @@ type Model struct {
 	dlqTopics      []DLQRow
 	logs           []string
 
+	lastUpdated time.Time
+	loading     bool
+
 	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
@@ -209,30 +212,35 @@ func (m *Model) loadData() DataUpdated {
 		return DataUpdated{}
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	logs := make([]string, 0, 2)
 	if err := m.store.Ping(ctx); err != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
+		logs = append(logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
 	} else {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
+		logs = append(logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
 	}
-
-	if len(m.logs) > 50 {
-		m.logs = m.logs[len(m.logs)-50:]
-	}
-
-	return DataUpdated{}
+	return DataUpdated{Logs: logs}
 }
 
 func (m *Model) fetchFromKafka() DataUpdated {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	data := DataUpdated{}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
+		if len(logs) > 50 {
+			logs = logs[len(logs)-50:]
+		}
+	}
 
 	cluster, err := m.kafkaClient.DescribeCluster(ctx)
 	if err != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] kafka error: %v", time.Now().Format("15:04:05"), err))
-		if len(m.logs) > 50 {
-			m.logs = m.logs[len(m.logs)-50:]
-		}
+		logf("kafka error: %v", err)
+		data.Logs = logs
 		return data
 	}
 
@@ -246,16 +254,13 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	}
 
 	if topicErr != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] topics error: %v", time.Now().Format("15:04:05"), topicErr))
+		logf("topics error: %v", topicErr)
 	}
 	if groupErr != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] groups error: %v", time.Now().Format("15:04:05"), groupErr))
+		logf("groups error: %v", groupErr)
 	}
-	m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: %d brokers, %d topics (%d partitions), %d groups",
-		time.Now().Format("15:04:05"), cluster.BrokerCount, topicCount, partCount, len(groups)))
-	if len(m.logs) > 50 {
-		m.logs = m.logs[len(m.logs)-50:]
-	}
+	logf("scrape: %d brokers, %d topics (%d partitions), %d groups",
+		cluster.BrokerCount, topicCount, partCount, len(groups))
 
 	for _, b := range cluster.Brokers {
 		status := statusOK + " UP"
@@ -282,16 +287,16 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	}
 
 	for _, g := range groups {
-		stateDisplay := statusOK + " " + g.State
 		data.ConsumerGroups = append(data.ConsumerGroups, ConsumerGroupRow{
 			Group:   g.Name,
-			Status:  stateDisplay,
+			Status:  statusOK + " " + g.State,
 			Members: g.Members,
 			Lag:     "-",
 			Topic:   "-",
 		})
 	}
 
+	data.Logs = logs
 	return data
 }
 
@@ -344,22 +349,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyData(d DataUpdated) {
-	if len(d.Brokers) > 0 {
-		m.brokers = d.Brokers
-	}
-	if len(d.Topics) > 0 {
-		m.topics = d.Topics
-	}
-	if len(d.ConsumerGroups) > 0 {
-		m.consumerGroups = d.ConsumerGroups
-	}
-	if len(d.Alerts) > 0 {
-		m.alerts = d.Alerts
-	}
-	if len(d.DLQTopics) > 0 {
-		m.dlqTopics = d.DLQTopics
-	}
+	m.brokers = d.Brokers
+	m.topics = d.Topics
+	m.consumerGroups = d.ConsumerGroups
+	m.alerts = d.Alerts
+	m.dlqTopics = d.DLQTopics
 	m.logs = d.Logs
+	m.lastUpdated = time.Now()
 }
 
 func (m *Model) buildTables() {
