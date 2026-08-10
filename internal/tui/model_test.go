@@ -137,6 +137,30 @@ func TestApplyDataPreservesTablesOnError(t *testing.T) {
 	}
 }
 
+func TestHeaderShowsLastUpdateTime(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.buildTables()
+
+	known := time.Date(2026, 8, 10, 12, 34, 56, 0, time.Local)
+	m.lastUpdated = known
+	if !strings.Contains(m.View(), known.Format("15:04:05")) {
+		t.Errorf("header should show data timestamp %q, view: %s", known.Format("15:04:05"), m.View())
+	}
+}
+
+func TestHeaderShowsPlaceholderBeforeFirstUpdate(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.buildTables()
+
+	if !strings.Contains(m.View(), "Updated: —") {
+		t.Error("header should show em-dash placeholder before first data arrival")
+	}
+}
+
 func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
 	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
 	m.Init()

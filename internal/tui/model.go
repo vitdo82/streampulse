@@ -518,8 +518,12 @@ func (m *Model) renderHeader() string {
 	if brokerCount == 0 {
 		brokerCount = 3 // default display
 	}
+	updated := "—"
+	if !m.lastUpdated.IsZero() {
+		updated = m.lastUpdated.Format("15:04:05")
+	}
 	status := fmt.Sprintf("Brokers: %d  │  Updated: %s  │  Auto-refresh: 2s",
-		brokerCount, time.Now().Format("15:04:05"))
+		brokerCount, updated)
 
 	right := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6B7280")).
