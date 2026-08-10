@@ -109,7 +109,7 @@ func (s *SQLiteStore) Rollup(ctx context.Context, resolution string) error {
 
 func (s *SQLiteStore) Purge(ctx context.Context, retention Retention) error {
 	cutoff := time.Now().Add(-retention.Raw)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM raw_metrics WHERE ts < ?`, cutoff.Unix())
+	_, err := s.db.ExecContext(ctx, `DELETE FROM raw_metrics WHERE ts < ?`, cutoff.UnixMilli())
 	return err
 }
 

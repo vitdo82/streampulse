@@ -48,3 +48,21 @@ func TestSQLiteStoreWriteBatch(t *testing.T) {
 	require.NoError(t, s.db.QueryRow(`SELECT tags FROM raw_metrics WHERE value = 13.5`).Scan(&tags))
 	assert.JSONEq(t, `{"a":"b"}`, tags)
 }
+
+func TestSQLiteStorePurge(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	err = s.WriteBatch(context.Background(), []Metric{
+		{TS: time.Now().Add(-48 * time.Hour), ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 1},
+		{TS: time.Now(), ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 2},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Purge(context.Background(), Retention{Raw: 24 * time.Hour}))
+
+	var count int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
+	assert.Equal(t, 1, count)
+}
