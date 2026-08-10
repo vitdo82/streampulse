@@ -183,6 +183,7 @@ func NewModelWithKafka(client *kafka.Client) *Model {
 // ─── Init ──────────────────────────────────────────────────────────────────
 
 func (m *Model) Init() tea.Cmd {
+	m.loading = true
 	return tea.Batch(
 		m.refreshCmd(), // immediate first load
 		tickCmd(),      // start 2-second tick

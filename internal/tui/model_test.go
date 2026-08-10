@@ -139,6 +139,10 @@ func TestApplyDataPreservesTablesOnError(t *testing.T) {
 
 func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
 	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	m.Init()
+	if !m.loading {
+		t.Error("expected loading=true after Init dispatched first refresh")
+	}
 
 	tm, _ := m.Update(tickMsg(time.Now()))
 	m = tm.(*Model)
