@@ -127,6 +127,13 @@ func (c *Client) ListConsumerGroups(ctx context.Context) ([]GroupInfo, error) {
 
 	var errs []error
 	for _, b := range c.brokers {
+		conn, err := dialer.DialContext(ctx, "tcp", b)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", b, err))
+			continue
+		}
+		conn.Close()
+
 		groups, err := c.groupsFromBroker(ctx, client, kafka.TCP(b))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", b, err))
