@@ -4,6 +4,7 @@ package kafka
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -384,18 +385,23 @@ func (c *Client) dial(ctx context.Context) (*kafka.Conn, error) {
 		return nil, fmt.Errorf("no brokers configured")
 	}
 
-	conn, err := kafka.DialContext(ctx, "tcp", c.brokers[0])
-	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
+	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
+	var errs []error
+	for _, b := range c.brokers {
+		conn, err := dialer.DialContext(ctx, "tcp", b)
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", b, err))
 	}
-	return conn, nil
+	return nil, fmt.Errorf("dial all brokers: %w", errors.Join(errs...))
 }
 
 // partitionsToTopics groups kafka-go partitions by topic, filtering internal topics.
 func partitionsToTopics(partitions []kafka.Partition) []TopicInfo {
 	topicPartitions := make(map[string]int)
 	for _, p := range partitions {
-		if isInternalTopic(p.Topic) {
+		if isInternalTopic(p.Topic) || p.Error != nil {
 			continue
 		}
 		topicPartitions[p.Topic]++

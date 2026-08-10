@@ -2,12 +2,14 @@ package kafka
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPartitionsToTopics(t *testing.T) {
@@ -83,4 +85,30 @@ func TestListConsumerGroupsIntegration(t *testing.T) {
 	}
 
 	t.Logf("discovered groups: %+v", groups)
+}
+
+func TestDialFailoverTriesAllBrokers(t *testing.T) {
+	c := NewClient([]string{"127.0.0.1:1", "127.0.0.1:2"})
+	err := c.Ping(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "127.0.0.1:1")
+	assert.Contains(t, err.Error(), "127.0.0.1:2")
+}
+
+func TestListConsumerGroupsNoBrokers(t *testing.T) {
+	c := NewClient(nil)
+	_, err := c.ListConsumerGroups(context.Background())
+	require.Error(t, err)
+}
+
+func TestPartitionsToTopicsSkipsErroredPartitions(t *testing.T) {
+	partitions := []kafka.Partition{
+		{Topic: "orders", ID: 0, Error: fmt.Errorf("leader not available")},
+		{Topic: "orders", ID: 1},
+		{Topic: "__consumer_offsets", ID: 0},
+	}
+	topics := partitionsToTopics(partitions)
+	require.Len(t, topics, 1)
+	assert.Equal(t, "orders", topics[0].Name)
+	assert.Equal(t, 1, topics[0].Partitions)
 }
