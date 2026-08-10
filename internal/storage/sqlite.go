@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,12 +73,15 @@ func (s *SQLiteStore) WriteBatch(ctx context.Context, metrics []Metric) error {
 	for _, m := range metrics {
 		tagsJSON := "{}"
 		if len(m.Tags) > 0 {
-			// Simplified: real implementation uses encoding/json
-			tagsJSON = fmt.Sprintf("%v", m.Tags)
+			b, err := json.Marshal(m.Tags)
+			if err != nil {
+				return fmt.Errorf("marshal tags for %s/%s: %w", m.EntityType, m.EntityName, err)
+			}
+			tagsJSON = string(b)
 		}
 
 		if _, err := stmt.ExecContext(ctx,
-			m.TS.Unix(), m.ClusterID, m.Metric,
+			m.TS.UnixMilli(), m.ClusterID, m.Metric,
 			m.EntityType, m.EntityName, tagsJSON, m.Value,
 		); err != nil {
 			return err

@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,4 +22,29 @@ func TestNewStoreDefaultsToSQLite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	defer store.Close()
+}
+
+func TestSQLiteStoreWriteBatch(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ts := time.Now().Truncate(time.Millisecond)
+	err = s.WriteBatch(context.Background(), []Metric{
+		{TS: ts, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 12.5},
+		{TS: ts.Add(5 * time.Second), ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Tags: map[string]string{"a": "b"}, Value: 13.5},
+	})
+	require.NoError(t, err)
+
+	var count int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
+	assert.Equal(t, 2, count)
+
+	var storedTS int64
+	require.NoError(t, s.db.QueryRow(`SELECT ts FROM raw_metrics WHERE value = 12.5`).Scan(&storedTS))
+	assert.Equal(t, ts.UnixMilli(), storedTS)
+
+	var tags string
+	require.NoError(t, s.db.QueryRow(`SELECT tags FROM raw_metrics WHERE value = 13.5`).Scan(&tags))
+	assert.JSONEq(t, `{"a":"b"}`, tags)
 }
