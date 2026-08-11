@@ -64,6 +64,7 @@ type DataUpdated struct {
 	Alerts         []AlertRow
 	DLQTopics      []DLQRow
 	Logs           []string
+	Failed         bool
 }
 
 // ─── Data Transfer Types ────────────────────────────────────────────────────
@@ -129,6 +130,9 @@ type Model struct {
 	dlqTopics      []DLQRow
 	logs           []string
 
+	lastUpdated time.Time
+	loading     bool
+
 	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
@@ -179,6 +183,7 @@ func NewModelWithKafka(client *kafka.Client) *Model {
 // ─── Init ──────────────────────────────────────────────────────────────────
 
 func (m *Model) Init() tea.Cmd {
+	m.loading = true
 	return tea.Batch(
 		m.refreshCmd(), // immediate first load
 		tickCmd(),      // start 2-second tick
@@ -209,30 +214,33 @@ func (m *Model) loadData() DataUpdated {
 		return DataUpdated{}
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	logs := make([]string, 0, 2)
 	if err := m.store.Ping(ctx); err != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
+		logs = append(logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
 	} else {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
+		logs = append(logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
 	}
-
-	if len(m.logs) > 50 {
-		m.logs = m.logs[len(m.logs)-50:]
-	}
-
-	return DataUpdated{}
+	return DataUpdated{Logs: logs}
 }
 
 func (m *Model) fetchFromKafka() DataUpdated {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	data := DataUpdated{}
+	logs := make([]string, 0, 2)
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
+	}
 
 	cluster, err := m.kafkaClient.DescribeCluster(ctx)
 	if err != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] kafka error: %v", time.Now().Format("15:04:05"), err))
-		if len(m.logs) > 50 {
-			m.logs = m.logs[len(m.logs)-50:]
-		}
+		logf("kafka error: %v", err)
+		data.Failed = true
+		data.Logs = logs
 		return data
 	}
 
@@ -246,16 +254,16 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	}
 
 	if topicErr != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] topics error: %v", time.Now().Format("15:04:05"), topicErr))
+		logf("topics error: %v", topicErr)
 	}
 	if groupErr != nil {
-		m.logs = append(m.logs, fmt.Sprintf("[%s] groups error: %v", time.Now().Format("15:04:05"), groupErr))
+		logf("groups error: %v", groupErr)
 	}
-	m.logs = append(m.logs, fmt.Sprintf("[%s] scrape: %d brokers, %d topics (%d partitions), %d groups",
-		time.Now().Format("15:04:05"), cluster.BrokerCount, topicCount, partCount, len(groups)))
-	if len(m.logs) > 50 {
-		m.logs = m.logs[len(m.logs)-50:]
+	if topicErr != nil || groupErr != nil {
+		data.Failed = true
 	}
+	logf("scrape: %d brokers, %d topics (%d partitions), %d groups",
+		cluster.BrokerCount, topicCount, partCount, len(groups))
 
 	for _, b := range cluster.Brokers {
 		status := statusOK + " UP"
@@ -282,16 +290,16 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	}
 
 	for _, g := range groups {
-		stateDisplay := statusOK + " " + g.State
 		data.ConsumerGroups = append(data.ConsumerGroups, ConsumerGroupRow{
 			Group:   g.Name,
-			Status:  stateDisplay,
+			Status:  statusOK + " " + g.State,
 			Members: g.Members,
 			Lag:     "-",
 			Topic:   "-",
 		})
 	}
 
+	data.Logs = logs
 	return data
 }
 
@@ -311,20 +319,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
-		// Auto-refresh: re-query store every 2 seconds
-		cmds = append(cmds, m.refreshCmd(), tickCmd())
+		if !m.loading {
+			m.loading = true
+			cmds = append(cmds, m.refreshCmd())
+		}
+		cmds = append(cmds, tickCmd())
 
 	case DataUpdated:
-		// New data arrived — update tables
+		m.loading = false
 		m.applyData(msg)
 		m.buildTables()
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			if m.store != nil {
-				m.store.Close()
-			}
 			return m, tea.Quit
 		case "tab", "l", "right":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
@@ -335,8 +343,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeTab = idx
 			}
 		case "r":
-			// Manual refresh
-			cmds = append(cmds, m.refreshCmd())
+			if !m.loading {
+				m.loading = true
+				cmds = append(cmds, m.refreshCmd())
+			}
 		}
 	}
 
@@ -344,22 +354,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyData(d DataUpdated) {
-	if len(d.Brokers) > 0 {
+	if !d.Failed {
 		m.brokers = d.Brokers
-	}
-	if len(d.Topics) > 0 {
 		m.topics = d.Topics
-	}
-	if len(d.ConsumerGroups) > 0 {
 		m.consumerGroups = d.ConsumerGroups
-	}
-	if len(d.Alerts) > 0 {
 		m.alerts = d.Alerts
-	}
-	if len(d.DLQTopics) > 0 {
 		m.dlqTopics = d.DLQTopics
+		m.lastUpdated = time.Now()
 	}
-	m.logs = d.Logs
+	m.logs = append(m.logs, d.Logs...)
+	if len(m.logs) > 50 {
+		m.logs = m.logs[len(m.logs)-50:]
+	}
 }
 
 func (m *Model) buildTables() {
@@ -437,7 +443,7 @@ func buildTable(cols []table.Column, rows []table.Row) table.Model {
 
 func rowsFromBrokers(b []BrokerRow) []table.Row {
 	if len(b) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(b))
 	for i, br := range b {
@@ -448,7 +454,7 @@ func rowsFromBrokers(b []BrokerRow) []table.Row {
 
 func rowsFromTopics(t []TopicRow) []table.Row {
 	if len(t) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(t))
 	for i, tp := range t {
@@ -459,7 +465,7 @@ func rowsFromTopics(t []TopicRow) []table.Row {
 
 func rowsFromConsumerGroups(g []ConsumerGroupRow) []table.Row {
 	if len(g) == 0 {
-		return []table.Row{{"Waiting for daemon...", "-", "-", "-", "-"}}
+		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(g))
 	for i, cg := range g {
@@ -512,8 +518,12 @@ func (m *Model) renderHeader() string {
 	if brokerCount == 0 {
 		brokerCount = 3 // default display
 	}
+	updated := "—"
+	if !m.lastUpdated.IsZero() {
+		updated = m.lastUpdated.Format("15:04:05")
+	}
 	status := fmt.Sprintf("Brokers: %d  │  Updated: %s  │  Auto-refresh: 2s",
-		brokerCount, time.Now().Format("15:04:05"))
+		brokerCount, updated)
 
 	right := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6B7280")).
@@ -677,6 +687,7 @@ func (m *Model) renderHelp() string {
 // Run starts the bubbletea program with live data.
 // If client is non-nil, data is fetched directly from Kafka.
 // Otherwise, the daemon's SQLite store is used.
+// The client is borrowed, not closed: callers own it (see cli.runTUI).
 func Run(client *kafka.Client) error {
 	if client != nil {
 		return runWithKafka(client)
@@ -699,7 +710,7 @@ func runWithStore(storePath string) error {
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
-	defer m.store.Close()
+	defer m.store.Close() // runWithStore owns the store; closes once on every exit path
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err

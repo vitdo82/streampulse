@@ -3,6 +3,9 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/pulsedev/streampulse/internal/kafka"
 )
 
 func TestModelInitialization(t *testing.T) {
@@ -64,19 +67,132 @@ func TestTabSwitching(t *testing.T) {
 	}
 }
 
-func TestEmptyTablesShowWaitingState(t *testing.T) {
+func TestEmptyTablesShowNoDataState(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.ready = true
 	m.buildTables()
 
-	// All tables should show waiting/empty state (text may be truncated by column width)
+	// All tables should show an honest empty state (text may be truncated by column width)
 	brokerView := m.brokersTable.View()
-	if !strings.Contains(brokerView, "Waiting for dae") && !strings.Contains(brokerView, "Waiting for daemon") {
-		t.Errorf("empty brokers table should show waiting state, got: %s", brokerView)
+	if !strings.Contains(brokerView, "No data") {
+		t.Errorf("empty brokers table should show no-data state, got: %s", brokerView)
 	}
 
 	alertView := m.alertsTable.View()
 	if !strings.Contains(alertView, "No alerts firing") {
 		t.Error("empty alerts table should show 'No alerts firing'")
+	}
+}
+
+func TestApplyDataPopulatesLogs(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Logs: []string{"[00:00:01] store connected"}})
+	if len(m.logs) != 1 || m.logs[0] != "[00:00:01] store connected" {
+		t.Errorf("logs not populated by applyData, got %v", m.logs)
+	}
+}
+
+func TestFetchFromKafkaLogsErrors(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	data := m.fetchFromKafka()
+	if len(data.Logs) == 0 {
+		t.Fatal("expected error log from unreachable broker")
+	}
+	if !strings.Contains(data.Logs[0], "kafka error") {
+		t.Errorf("expected kafka error log, got %q", data.Logs[0])
+	}
+}
+
+func TestApplyDataAccumulatesLogs(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Logs: []string{"[00:00:01] a"}})
+	m.applyData(DataUpdated{Logs: []string{"[00:00:02] b"}})
+	if len(m.logs) != 2 || m.logs[0] != "[00:00:01] a" || m.logs[1] != "[00:00:02] b" {
+		t.Errorf("logs should accumulate, got %v", m.logs)
+	}
+}
+
+func TestApplyDataClearsStaleData(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}, Topics: []TopicRow{{Name: "t1"}}})
+	if len(m.topics) != 1 {
+		t.Fatalf("expected 1 topic, got %d", len(m.topics))
+	}
+
+	m.applyData(DataUpdated{})
+	if len(m.topics) != 0 || len(m.brokers) != 0 {
+		t.Errorf("empty snapshot should clear stale data, got topics=%d brokers=%d", len(m.topics), len(m.brokers))
+	}
+}
+
+func TestApplyDataPreservesTablesOnError(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}, Topics: []TopicRow{{Name: "t1"}}})
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] kafka error: boom"}})
+	if len(m.topics) != 1 || len(m.brokers) != 1 {
+		t.Errorf("failed snapshot must not wipe tables, got topics=%d brokers=%d", len(m.topics), len(m.brokers))
+	}
+	if len(m.logs) != 1 || !strings.Contains(m.logs[0], "kafka error") {
+		t.Errorf("logs must still apply on failed snapshot, got %v", m.logs)
+	}
+}
+
+func TestHeaderShowsLastUpdateTime(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.buildTables()
+
+	known := time.Date(2026, 8, 10, 12, 34, 56, 0, time.Local)
+	m.lastUpdated = known
+	if !strings.Contains(m.View(), known.Format("15:04:05")) {
+		t.Errorf("header should show data timestamp %q, view: %s", known.Format("15:04:05"), m.View())
+	}
+}
+
+func TestHeaderShowsPlaceholderBeforeFirstUpdate(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.buildTables()
+
+	if !strings.Contains(m.View(), "Updated: —") {
+		t.Error("header should show em-dash placeholder before first data arrival")
+	}
+}
+
+func TestFailedFetchDoesNotStampLastUpdated(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}})
+	before := m.lastUpdated
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] kafka error"}})
+	if !m.lastUpdated.Equal(before) {
+		t.Errorf("failed fetch must not change lastUpdated: before=%v after=%v", before, m.lastUpdated)
+	}
+}
+
+func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	m.Init()
+	if !m.loading {
+		t.Error("expected loading=true after Init dispatched first refresh")
+	}
+
+	tm, _ := m.Update(tickMsg(time.Now()))
+	m = tm.(*Model)
+	if !m.loading {
+		t.Error("expected loading=true after tick dispatched refresh")
+	}
+
+	tm, _ = m.Update(DataUpdated{})
+	m = tm.(*Model)
+	if m.loading {
+		t.Error("expected loading=false after DataUpdated arrived")
+	}
+
+	tm, _ = m.Update(tickMsg(time.Now()))
+	m = tm.(*Model)
+	if !m.loading {
+		t.Error("expected loading=true again after DataUpdated")
 	}
 }
