@@ -230,6 +230,19 @@ func TestNewClientWithOptionsSASLErrors(t *testing.T) {
 	}
 }
 
+func TestNewClientWithOptionsSASLAWSIAM(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	c, err := NewClientWithOptions([]string{"localhost:9098"}, Options{
+		SASL: SASLOptions{Mechanism: "aws-iam"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "AWS_MSK_IAM", c.dialer.SASLMechanism.Name())
+	require.NotNil(t, c.transport.SASL)
+}
+
 func TestListTopicsIntegration(t *testing.T) {
 	broker := os.Getenv("STREAMPULSE_TEST_BROKER")
 	if broker == "" {

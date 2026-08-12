@@ -10,6 +10,8 @@ import (
 	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
+
+	"github.com/pulsedev/streampulse/internal/kafka/sasliam"
 )
 
 // TLSOptions configures TLS and mutual TLS for broker connections. An empty
@@ -98,7 +100,7 @@ func buildSASL(opts SASLOptions, getenv func(string) string) (sasl.Mechanism, er
 			return scram.Mechanism(scram.SHA512, opts.Username, password)
 		}
 	case "aws-iam":
-		return buildAWSIAM(opts)
+		return &sasliam.Mechanism{Provider: sasliam.EnvProvider{}}, nil
 	default:
 		return nil, fmt.Errorf("unknown sasl mechanism %q", opts.Mechanism)
 	}
@@ -115,9 +117,4 @@ func saslPassword(opts SASLOptions, getenv func(string) string) (string, error) 
 		return "", fmt.Errorf("sasl %s: environment variable %s is not set or empty", opts.Mechanism, opts.PasswordEnv)
 	}
 	return password, nil
-}
-
-// buildAWSIAM constructs the AWS MSK IAM mechanism (wired in a later phase).
-func buildAWSIAM(SASLOptions) (sasl.Mechanism, error) {
-	return nil, fmt.Errorf("sasl mechanism %q is not supported yet", "aws-iam")
 }
