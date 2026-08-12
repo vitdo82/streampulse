@@ -2,10 +2,12 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/kafka"
@@ -694,4 +696,107 @@ func TestJKWithoutPatternsKeepsAnalyticsSelection(t *testing.T) {
 	tm, _ = m.Update(key("k"))
 	m = tm.(*Model)
 	assert.Equal(t, 0, m.selectedTopic)
+}
+
+// ─── Analyze CLI view ───────────────────────────────────────────────────────
+
+func TestAnalyzeKeyOpensView(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.activeTab = 5
+	m.ready = true
+	m.buildTables()
+
+	tm, cmd := m.Update(key("a"))
+	m = tm.(*Model)
+	assert.True(t, m.analyzeViewOpen, "a on analytics tab opens the analyze view")
+	assert.True(t, m.analyzeRunning, "a marks the analyze subprocess as running")
+	assert.Equal(t, "24h", m.analyzeWindow, "default analyze window")
+	assert.NotNil(t, cmd, "a dispatches the analyze exec command")
+
+	tm, _ = m.Update(key("a"))
+	m = tm.(*Model)
+	assert.True(t, m.analyzeRunning, "second a while running is ignored")
+}
+
+func TestAnalyzeKeyIgnoredOffAnalyticsTab(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.activeTab = 0
+
+	tm, cmd := m.Update(key("a"))
+	m = tm.(*Model)
+	assert.False(t, m.analyzeViewOpen, "a off the analytics tab does nothing")
+	assert.Nil(t, cmd)
+}
+
+func TestAnalyzeWindowCycles(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.activeTab = 5
+
+	for _, want := range []string{"168h", "720h", "24h"} {
+		tm, _ := m.Update(key("w"))
+		m = tm.(*Model)
+		assert.Equal(t, want, m.analyzeWindow)
+	}
+}
+
+func TestAnalyzeDoneMsgShowsOutput(t *testing.T) {
+	m := NewModelWithStore(nil)
+	v := viewport.New(80, 10)
+	m.analyzeView = &v
+
+	tm, _ := m.Update(analyzeDoneMsg{output: "TOPIC          RATE\norders         12.5\n"})
+	m = tm.(*Model)
+	assert.False(t, m.analyzeRunning, "done resets the running flag")
+	assert.Contains(t, m.analyzeOut, "orders")
+	assert.Contains(t, m.analyzeView.View(), "orders", "output lands in the viewport")
+}
+
+func TestAnalyzeDoneMsgError(t *testing.T) {
+	m := NewModelWithStore(nil)
+
+	tm, _ := m.Update(analyzeDoneMsg{err: fmt.Errorf("boom")})
+	m = tm.(*Model)
+	assert.False(t, m.analyzeRunning)
+	assert.Contains(t, m.analyzeOut, "analyze failed: boom")
+}
+
+func TestEscAndQCloseAnalyzeView(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.analyzeViewOpen = true
+
+	tm, _ := m.Update(key("esc"))
+	m = tm.(*Model)
+	assert.False(t, m.analyzeViewOpen, "esc closes the analyze view")
+
+	m.analyzeViewOpen = true
+	tm, _ = m.Update(key("q"))
+	m = tm.(*Model)
+	assert.False(t, m.analyzeViewOpen, "q closes the analyze view instead of quitting")
+}
+
+func TestAnalyzeViewScrolling(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.analyzeViewOpen = true
+	v := viewport.New(80, 10)
+	m.analyzeView = &v
+	m.analyzeView.SetContent(strings.Repeat("line\n", 50))
+
+	before := m.analyzeView.YOffset
+	tm, _ := m.Update(key("j"))
+	m = tm.(*Model)
+	assert.Greater(t, m.analyzeView.YOffset, before, "j scrolls the analyze viewport")
+}
+
+func TestRenderAnalyzeView(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.analyzeViewOpen = true
+	v := viewport.New(116, 20)
+	m.analyzeView = &v
+	m.analyzeView.SetContent("analysis results")
+
+	view := m.View()
+	assert.Contains(t, view, "analysis results")
+	assert.Contains(t, view, "esc/q: close")
 }

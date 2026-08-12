@@ -4,10 +4,13 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -61,6 +64,15 @@ var (
 // ─── Messages ──────────────────────────────────────────────────────────────
 
 type tickMsg time.Time
+
+// analyzeDoneMsg carries the captured output of the analyze subprocess.
+type analyzeDoneMsg struct {
+	output string
+	err    error
+}
+
+// analyzeWindows are the selectable --window values for the analyze view.
+var analyzeWindows = []string{"24h", "168h", "720h"}
 
 // DataUpdated is sent when the daemon writes new data (simulated via tick for now).
 type DataUpdated struct {
@@ -158,6 +170,13 @@ type Model struct {
 	dlqView    *viewport.Model
 	dlqTopic   string
 	dlqConfirm bool
+
+	// Analyze CLI view (Analytics tab, key "a")
+	analyzeRunning  bool
+	analyzeWindow   string
+	analyzeOut      string
+	analyzeViewOpen bool
+	analyzeView     *viewport.Model
 
 	// DLQ module hooks (injectable for tests)
 	discoverDLQ  func(ctx context.Context, client dlq.Client, suffixes []string) ([]dlq.Topic, error)
@@ -647,6 +666,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.ready = true
 			m.logView = viewport.New(msg.Width, 6)
+			m.analyzeView = &viewport.Model{}
+			*m.analyzeView = viewport.New(msg.Width-4, msg.Height-6)
 			m.buildTables()
 		}
 
@@ -668,9 +689,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dlqReplayMsg:
 		m.handleDLQReplayMsg(msg)
 
+	case analyzeDoneMsg:
+		m.analyzeRunning = false
+		if msg.err != nil {
+			m.analyzeOut = fmt.Sprintf("analyze failed: %v\n%s", msg.err, msg.output)
+		} else {
+			m.analyzeOut = msg.output
+		}
+		if m.analyzeView != nil {
+			m.analyzeView.SetContent(m.analyzeOut)
+			m.analyzeView.GotoTop()
+		}
+
 	case tea.KeyMsg:
 		if m.dlqView != nil {
 			cmds = append(cmds, m.handleDLQViewKey(msg))
+			break
+		}
+		if m.analyzeViewOpen {
+			cmds = append(cmds, m.handleAnalyzeViewKey(msg))
 			break
 		}
 		if m.searching {
@@ -712,6 +749,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				cmds = append(cmds, m.refreshCmd())
 			}
+		case "a":
+			if m.activeTab == 5 && !m.analyzeRunning {
+				if m.analyzeWindow == "" {
+					m.analyzeWindow = analyzeWindows[0]
+				}
+				m.analyzeRunning = true
+				m.analyzeViewOpen = true
+				if m.analyzeView != nil {
+					m.analyzeView.SetContent("running analyze...")
+				}
+				cmds = append(cmds, m.analyzeCmd())
+			}
+		case "w":
+			if m.activeTab == 5 && !m.analyzeRunning {
+				m.cycleAnalyzeWindow()
+			}
 		}
 	}
 
@@ -745,6 +798,55 @@ func (m *Model) closeDLQView() {
 	m.dlqView = nil
 	m.dlqTopic = ""
 	m.dlqConfirm = false
+}
+
+// analyzeCmd shells out to the analyze CLI, capturing its output.
+func (m *Model) analyzeCmd() tea.Cmd {
+	exe, err := os.Executable()
+	if err != nil {
+		return func() tea.Msg {
+			return analyzeDoneMsg{err: fmt.Errorf("resolve executable: %w", err)}
+		}
+	}
+	c := exec.Command(exe, "analyze", "--window", m.analyzeWindow)
+	var out bytes.Buffer
+	c.Stdout = &out
+	c.Stderr = &out
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return analyzeDoneMsg{output: out.String(), err: err}
+	})
+}
+
+// handleAnalyzeViewKey handles keys while the analyze CLI view is open.
+func (m *Model) handleAnalyzeViewKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc", "q":
+		m.analyzeViewOpen = false
+		m.analyzeOut = ""
+	case "j", "down":
+		if m.analyzeView != nil {
+			m.analyzeView.LineDown(1)
+		}
+	case "k", "up":
+		if m.analyzeView != nil {
+			m.analyzeView.LineUp(1)
+		}
+	}
+	return nil
+}
+
+// cycleAnalyzeWindow rotates the analyze --window value (24h → 168h → 720h).
+func (m *Model) cycleAnalyzeWindow() {
+	if m.analyzeWindow == "" {
+		m.analyzeWindow = analyzeWindows[0]
+	}
+	for i, w := range analyzeWindows {
+		if w == m.analyzeWindow {
+			m.analyzeWindow = analyzeWindows[(i+1)%len(analyzeWindows)]
+			return
+		}
+	}
+	m.analyzeWindow = analyzeWindows[0]
 }
 
 // handleSearchKey handles keys while topic search is active: printable runes
@@ -953,11 +1055,36 @@ func (m *Model) View() string {
 		return "Initializing StreamPulse..."
 	}
 
+	if m.analyzeViewOpen {
+		return m.renderAnalyzeView()
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.renderHeader(),
 		m.renderTabs(),
 		m.renderContent(),
 		m.renderHelp(),
+	)
+}
+
+// renderAnalyzeView is the full-screen overlay showing the analyze CLI output.
+func (m *Model) renderAnalyzeView() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 2).
+		Render(fmt.Sprintf("⚡ analyze --window %s", m.analyzeWindow))
+
+	body := "running..."
+	if m.analyzeView != nil {
+		body = m.analyzeView.View()
+	}
+	if body == "" {
+		body = "no output"
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		body,
+		helpStyle.Render("  esc/q: close  │  j/k: scroll"),
 	)
 }
 
@@ -1353,7 +1480,7 @@ func (m *Model) renderPatternsPane() string {
 }
 
 func (m *Model) renderHelp() string {
-	help := "tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s"
+	help := "tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  a: analyze CLI (tab 6)  │  q: quit  │  Auto-refresh: 2s"
 	if m.searching {
 		help = fmt.Sprintf("/ search: %s  │  esc: close", m.searchQuery)
 	}
