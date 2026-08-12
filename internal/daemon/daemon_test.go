@@ -77,7 +77,23 @@ func TestRunReturnsOnExternalShutdown(t *testing.T) {
 }
 
 func TestShutdownIsIdempotent(t *testing.T) {
-	d := New(testConfig(), nil, kafka.NewClient([]string{"127.0.0.1:1"}))
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer store.Close()
+
+	d := New(testConfig(), store, kafka.NewClient([]string{"127.0.0.1:1"}))
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(context.Background()) }()
+
+	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, d.Shutdown())
-	require.NoError(t, d.Shutdown())
+	require.NoError(t, d.Shutdown()) // second signal path: must be a no-op
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
 }

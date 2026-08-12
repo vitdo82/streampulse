@@ -5,13 +5,16 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
+	"github.com/robfig/cron/v3"
 )
 
 // shutdownGrace bounds how long Shutdown waits for loops and the HTTP server
@@ -31,10 +34,13 @@ type Daemon struct {
 	client  *kafka.Client
 	scraper Scraper
 
-	mu     sync.Mutex // guards cancel
-	cancel context.CancelFunc
-	once   sync.Once
-	wg     sync.WaitGroup
+	scraping atomic.Bool // in-flight guard for the scrape loop
+
+	mu      sync.Mutex // guards cancel
+	cancel  context.CancelFunc
+	stopped chan struct{} // closed by Run once all loops have exited
+	once    sync.Once
+	wg      sync.WaitGroup
 }
 
 // New creates a Daemon around the store and kafka client. The client is
@@ -46,23 +52,27 @@ func New(cfg *config.Config, store storage.MetricsStore, client *kafka.Client) *
 		store:   store,
 		client:  client,
 		scraper: scraper.New(cfg.ClusterID, client, store, interval),
+		stopped: make(chan struct{}),
 	}
 }
 
 // Run blocks until ctx is canceled (or Shutdown is called), then waits for
-// all loops within the shutdown grace period and returns nil.
+// all loops to exit and returns nil.
 func (d *Daemon) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	d.mu.Lock()
 	d.cancel = cancel
 	d.mu.Unlock()
-	d.startLoops(runCtx)
-	<-runCtx.Done()
-	return d.Shutdown()
+
+	d.startLoops(runCtx) // registers all loop goroutines synchronously
+	d.wg.Wait()          // loops exit when runCtx is canceled
+	close(d.stopped)
+	return nil
 }
 
-// Shutdown stops the loops and waits for them within the grace period. It is
-// idempotent and safe to call from a second-signal handler.
+// Shutdown cancels the loop context and waits for the loops within the
+// shutdown grace period. It is idempotent and safe to call from a
+// second-signal handler.
 func (d *Daemon) Shutdown() error {
 	d.once.Do(func() {
 		d.mu.Lock()
@@ -71,30 +81,34 @@ func (d *Daemon) Shutdown() error {
 		if cancel != nil {
 			cancel()
 		}
-		waitTimeout(&d.wg, shutdownGrace)
+		select {
+		case <-d.stopped:
+		case <-time.After(shutdownGrace):
+		}
 	})
 	return nil
 }
 
-// startLoops launches the daemon's background loops. The scrape and rollup
-// loops arrive with Task 4B; the alert loop is Phase 5.
-func (d *Daemon) startLoops(ctx context.Context) {
-	// TODO(4B): scrape and rollup loops.
-	// TODO(5E): alert loop.
-	_ = ctx
+// goLoop launches a daemon loop, registering it with the WaitGroup
+// synchronously so Shutdown's wait can never race loop startup.
+func (d *Daemon) goLoop(fn func()) {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		fn()
+	}()
 }
 
-// waitTimeout waits for wg up to timeout, reporting whether it finished.
-func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		wg.Wait()
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
+// startLoops launches the daemon's background loops.
+func (d *Daemon) startLoops(ctx context.Context) {
+	interval, err := d.cfg.ParseScrapeInterval()
+	if err != nil {
+		slog.Error("invalid scrape interval, using 5s", "err", err)
+		interval = 5 * time.Second
 	}
+
+	d.goLoop(func() { runScrapeLoop(ctx, d, time.NewTicker(interval).C) })
+	d.goLoop(func() { runRollupLoop(ctx, d, cron.New()) })
+
+	// TODO(5E): alert loop.
 }
