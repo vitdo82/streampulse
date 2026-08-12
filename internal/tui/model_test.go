@@ -1,11 +1,15 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestModelInitialization(t *testing.T) {
@@ -195,4 +199,80 @@ func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
 	if !m.loading {
 		t.Error("expected loading=true again after DataUpdated")
 	}
+}
+
+// ─── Store mode (daemon persistence) ────────────────────────────────────────
+
+func TestLoadDataReadsPersistedMetrics(t *testing.T) {
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer store.Close()
+
+	now := time.Now().Add(-30 * time.Second)
+	err = store.WriteBatch(context.Background(), []storage.Metric{
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.broker.leader_partitions", EntityType: "broker", EntityName: "localhost:9093", Value: 12},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.broker.replica_partitions", EntityType: "broker", EntityName: "localhost:9093", Value: 20},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.topic.partition_count", EntityType: "topic", EntityName: "orders", Value: 6},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.topic.msg_rate", EntityType: "topic", EntityName: "orders", Value: 42.5},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.topic.bytes_rate", EntityType: "topic", EntityName: "orders", Value: 1000},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.group.lag", EntityType: "consumer_group", EntityName: "orders-processor", Value: 1500},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.group.member_count", EntityType: "consumer_group", EntityName: "orders-processor", Value: 3},
+		{TS: now, ClusterID: "local-dev", Metric: "kafka.group.state", EntityType: "consumer_group", EntityName: "orders-processor", Value: 1},
+	})
+	require.NoError(t, err)
+
+	m := NewModelWithStore(store)
+	data := m.loadData()
+
+	require.Len(t, data.Brokers, 1)
+	b := data.Brokers[0]
+	assert.Equal(t, "localhost:9093", b.ID)
+	assert.Contains(t, b.CPU, "12")
+	assert.Contains(t, b.Memory, "20")
+
+	require.Len(t, data.Topics, 1)
+	tp := data.Topics[0]
+	assert.Equal(t, "orders", tp.Name)
+	assert.Equal(t, 6, tp.Partitions)
+	assert.Equal(t, "42.5", tp.MsgRate)
+	assert.Equal(t, "1000.0", tp.BytesRate)
+
+	require.Len(t, data.ConsumerGroups, 1)
+	g := data.ConsumerGroups[0]
+	assert.Equal(t, "orders-processor", g.Group)
+	assert.Equal(t, "1500.0", g.Lag)
+	assert.Equal(t, 3, g.Members)
+	assert.Contains(t, g.Status, "STABLE")
+
+	require.NotEmpty(t, data.Logs)
+	assert.False(t, data.Failed)
+}
+
+func TestLoadDataStoreOffline(t *testing.T) {
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, store.Close()) // closed store fails Ping
+
+	m := NewModelWithStore(store)
+	data := m.loadData()
+
+	assert.True(t, data.Failed, "offline store must mark the snapshot failed")
+	require.Len(t, data.Logs, 1)
+	assert.Contains(t, data.Logs[0], "store offline")
+}
+
+func TestLoadDataEmptyStore(t *testing.T) {
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer store.Close()
+
+	m := NewModelWithStore(store)
+	data := m.loadData()
+
+	assert.False(t, data.Failed)
+	assert.Len(t, data.Brokers, 0)
+	assert.Len(t, data.Topics, 0)
+	assert.Len(t, data.ConsumerGroups, 0)
+	require.NotEmpty(t, data.Logs)
+	assert.Contains(t, data.Logs[0], "store connected")
 }

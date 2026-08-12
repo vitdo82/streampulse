@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -217,13 +218,130 @@ func (m *Model) loadData() DataUpdated {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	data := DataUpdated{}
 	logs := make([]string, 0, 2)
-	if err := m.store.Ping(ctx); err != nil {
-		logs = append(logs, fmt.Sprintf("[%s] store offline: %v", time.Now().Format("15:04:05"), err))
-	} else {
-		logs = append(logs, fmt.Sprintf("[%s] store connected", time.Now().Format("15:04:05")))
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
 	}
-	return DataUpdated{Logs: logs}
+
+	if err := m.store.Ping(ctx); err != nil {
+		logf("store offline: %v", err)
+		data.Failed = true
+		data.Logs = logs
+		return data
+	}
+	logf("store connected")
+
+	// Query the last minute of persisted metrics and map the latest value
+	// per entity into the dashboard rows. QueryRaw orders by timestamp
+	// ascending, so later rows overwrite earlier ones per entity.
+	rows, err := m.store.QueryRaw(ctx, storage.QueryParams{
+		From:  time.Now().Add(-time.Minute),
+		Limit: 10000,
+	})
+	if err != nil {
+		logf("query store: %v", err)
+		data.Failed = true
+		data.Logs = logs
+		return data
+	}
+
+	latest := make(map[string]map[string]float64) // metric → entity → value
+	for _, r := range rows {
+		if latest[r.Metric] == nil {
+			latest[r.Metric] = make(map[string]float64)
+		}
+		latest[r.Metric][r.EntityName] = r.Avg
+	}
+
+	data.Brokers = brokerRowsFromStore(latest)
+	data.Topics = topicRowsFromStore(latest)
+	data.ConsumerGroups = groupRowsFromStore(latest)
+	data.Logs = logs
+	return data
+}
+
+// brokerRowsFromStore maps latest broker metrics into dashboard rows.
+func brokerRowsFromStore(latest map[string]map[string]float64) []BrokerRow {
+	rows := make([]BrokerRow, 0, len(latest["kafka.broker.leader_partitions"]))
+	for name, leaders := range latest["kafka.broker.leader_partitions"] {
+		row := BrokerRow{
+			ID:     name,
+			Status: statusOK + " UP",
+			CPU:    fmt.Sprintf("%.0f leaders", leaders),
+			Memory: "-",
+			Rate:   "-",
+		}
+		if replicas, ok := latest["kafka.broker.replica_partitions"][name]; ok {
+			row.Memory = fmt.Sprintf("%.0f replicas", replicas)
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows
+}
+
+// topicRowsFromStore maps latest topic metrics into dashboard rows.
+func topicRowsFromStore(latest map[string]map[string]float64) []TopicRow {
+	rows := make([]TopicRow, 0, len(latest["kafka.topic.partition_count"]))
+	for name, parts := range latest["kafka.topic.partition_count"] {
+		row := TopicRow{
+			Name:       name,
+			Partitions: int(parts),
+			MsgRate:    "-",
+			BytesRate:  "-",
+			Retention:  "-",
+		}
+		if v, ok := latest["kafka.topic.msg_rate"][name]; ok {
+			row.MsgRate = fmt.Sprintf("%.1f", v)
+		}
+		if v, ok := latest["kafka.topic.bytes_rate"][name]; ok {
+			row.BytesRate = fmt.Sprintf("%.1f", v)
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows
+}
+
+// groupRowsFromStore maps latest consumer-group metrics into dashboard rows.
+func groupRowsFromStore(latest map[string]map[string]float64) []ConsumerGroupRow {
+	rows := make([]ConsumerGroupRow, 0, len(latest["kafka.group.lag"]))
+	for name, lag := range latest["kafka.group.lag"] {
+		row := ConsumerGroupRow{
+			Group:   name,
+			Lag:     fmt.Sprintf("%.1f", lag),
+			Status:  "-",
+			Members: 0,
+			Topic:   "-",
+		}
+		if v, ok := latest["kafka.group.member_count"][name]; ok {
+			row.Members = int(v)
+		}
+		if v, ok := latest["kafka.group.state"][name]; ok {
+			row.Status = statusOK + " " + groupStateName(v)
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Group < rows[j].Group })
+	return rows
+}
+
+// groupStateName maps the persisted numeric group state (scraper.md: 0=Empty,
+// 1=Stable, 2=PreparingRebalance, 3=CompletingRebalance, 4=Dead) to a label.
+func groupStateName(state float64) string {
+	switch int(state) {
+	case 1:
+		return "STABLE"
+	case 2:
+		return "PREPARING REBALANCE"
+	case 3:
+		return "COMPLETING REBALANCE"
+	case 4:
+		return "DEAD"
+	default:
+		return "EMPTY"
+	}
 }
 
 func (m *Model) fetchFromKafka() DataUpdated {
