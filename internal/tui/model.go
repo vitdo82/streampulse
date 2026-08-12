@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/dlq"
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
 )
 
@@ -166,6 +168,10 @@ type Model struct {
 	analytics        []analytics.GrowthReport
 	skew             []analytics.SkewReport
 	retention        []analytics.RetentionReport
+	anomalies        []analytics.Anomaly
+	rebalances       []analytics.RebalanceReport
+	patterns         []analytics.ThroughputReport
+	patternIdx       int
 	analyticsErr     error
 	analyticsUpdated time.Time
 	selectedTopic    int
@@ -440,6 +446,33 @@ func (m *Model) refreshAnalytics(ctx context.Context) error {
 			m.analytics = topGrowth(reports, analyticsTopN)
 			m.selectedTopic = 0
 		}
+
+		// L2 reports: anomalies, rebalance history, and throughput patterns
+		// (topics from the live topics table; skipped without any).
+		anoms, err := a.Anomalies(ctx, nil, analyticsWindow)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("anomalies: %w", err))
+		} else {
+			m.anomalies = anoms
+		}
+		rebs, err := a.Rebalances(ctx, nil, analyticsWindow)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("rebalances: %w", err))
+		} else {
+			m.rebalances = rebs
+		}
+		topics := topicNamesOf(m.topics)
+		if len(topics) > 0 {
+			pats, err := a.Patterns(ctx, topics, scraper.MetricTopicMsgRate, analyticsWindow)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("patterns: %w", err))
+			} else {
+				m.patterns = pats
+				if m.patternIdx >= len(m.patterns) {
+					m.patternIdx = 0
+				}
+			}
+		}
 	}
 	if m.kafkaClient != nil {
 		a := analytics.NewAnalyzer(m.store, m.kafkaClient)
@@ -483,6 +516,15 @@ func growthTopicNames(reports []analytics.GrowthReport) []string {
 	return names
 }
 
+// topicNamesOf returns the names of the given topic rows.
+func topicNamesOf(rows []TopicRow) []string {
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.Name)
+	}
+	return names
+}
+
 // cycleAnalyticsSelection moves the highlighted growth topic, wrapping at
 // both ends of the cached list.
 func (m *Model) cycleAnalyticsSelection(delta int) {
@@ -492,6 +534,17 @@ func (m *Model) cycleAnalyticsSelection(delta int) {
 		return
 	}
 	m.selectedTopic = (m.selectedTopic + delta + n) % n
+}
+
+// cyclePatternSelection moves the highlighted pattern topic, wrapping at both
+// ends. Without cached patterns it falls back to the growth selection.
+func (m *Model) cyclePatternSelection(delta int) {
+	n := len(m.patterns)
+	if n == 0 {
+		m.cycleAnalyticsSelection(delta)
+		return
+	}
+	m.patternIdx = (m.patternIdx + delta + n) % n
 }
 
 func (m *Model) fetchFromKafka() DataUpdated {
@@ -635,13 +688,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 		case "j", "down":
 			if m.activeTab == 5 {
-				m.cycleAnalyticsSelection(1)
+				m.cyclePatternSelection(1)
 			} else if t := m.activeTable(); t != nil {
 				t.MoveDown(1)
 			}
 		case "k", "up":
 			if m.activeTab == 5 {
-				m.cycleAnalyticsSelection(-1)
+				m.cyclePatternSelection(-1)
 			} else if t := m.activeTable(); t != nil {
 				t.MoveUp(1)
 			}
@@ -1079,6 +1132,12 @@ func (m *Model) renderAnalyticsView() string {
 		m.renderSkewPane(),
 		"",
 		m.renderRetentionPane(),
+		"",
+		m.renderAnomaliesPane(),
+		"",
+		m.renderRebalancesPane(),
+		"",
+		m.renderPatternsPane(),
 	)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -1193,6 +1252,102 @@ func (m *Model) renderRetentionPane() string {
 	}
 	if len(lines) == 0 {
 		lines = append(lines, helpStyle.Render("  all topics within retention"))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderAnomaliesPane renders the most severe anomaly points, ordered by
+// |z-score| descending, with the severity colored (warning → yellow,
+// critical → red).
+func (m *Model) renderAnomaliesPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render("ANOMALIES")
+
+	if len(m.anomalies) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no anomaly data"))
+	}
+
+	sorted := append([]analytics.Anomaly(nil), m.anomalies...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return math.Abs(sorted[i].ZScore) > math.Abs(sorted[j].ZScore)
+	})
+	if len(sorted) > analyticsTopN {
+		sorted = sorted[:analyticsTopN]
+	}
+
+	lines := make([]string, 0, len(sorted)+1)
+	lines = append(lines, fmt.Sprintf("  %-22s %-24s %9s %9s %6s %-4s %s",
+		"ENTITY", "METRIC", "VALUE", "EXPECTED", "Z", "DIR", "SEVERITY"))
+	for _, an := range sorted {
+		sev := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render(an.Severity)
+		if an.Severity == "critical" {
+			sev = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render(an.Severity)
+		}
+		lines = append(lines, fmt.Sprintf("  %-22s %-24s %9.1f %9.1f %6.2f %-4s %s",
+			an.Entity, an.Metric, an.Value, an.Expected, an.ZScore, an.Direction, sev))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderRebalancesPane renders the per-group per-day rebalance counts, most
+// recent last (up to 10 rows).
+func (m *Model) renderRebalancesPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render("REBALANCES")
+
+	if len(m.rebalances) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no rebalance data"))
+	}
+
+	rows := m.rebalances
+	start := 0
+	if len(rows) > 10 {
+		start = len(rows) - 10
+	}
+	lines := make([]string, 0, len(rows)-start+1)
+	lines = append(lines, fmt.Sprintf("  %-22s %-12s %s", "GROUP", "DAY", "REBALANCES"))
+	for _, r := range rows[start:] {
+		lines = append(lines, fmt.Sprintf("  %-22s %-12s %d",
+			r.Group, r.Day.Format("2006-01-02"), r.Count))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderPatternsPane renders the hourly throughput profile of the selected
+// topic (j/k to cycle), its peak hour, and the 7-day forecast.
+func (m *Model) renderPatternsPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render("PATTERNS")
+
+	if len(m.patterns) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+	}
+
+	p := m.patterns[m.patternIdx%len(m.patterns)]
+	labels := make([]string, len(p.HourlyProfile))
+	for h := range p.HourlyProfile {
+		labels[h] = fmt.Sprintf("%02d", h)
+	}
+	width := m.width - 4
+	if width < 10 {
+		width = 80
+	}
+	chart := analytics.Bars(labels, p.HourlyProfile[:], width)
+
+	lines := []string{
+		fmt.Sprintf("  %s — %s (7d)  peak %02d:00  forecast 7d: %.1f",
+			p.Topic, p.Metric, p.PeakHour, p.Forecast7d),
+		"",
+		chart,
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
