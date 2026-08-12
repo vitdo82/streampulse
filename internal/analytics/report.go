@@ -27,6 +27,18 @@ type SkewReport struct {
 	Balanced bool           `json:"balanced"`
 }
 
+// Anomaly flags one point that deviates from its baseline.
+type Anomaly struct {
+	Metric    string    `json:"metric"`
+	Entity    string    `json:"entity"`
+	Time      time.Time `json:"time"`
+	Value     float64   `json:"value"`
+	Expected  float64   `json:"expected"`
+	ZScore    float64   `json:"z_score"`
+	Direction string    `json:"direction"` // high | low
+	Severity  string    `json:"severity"`  // warning | critical
+}
+
 // ThroughputReport describes the time-of-day/day-of-week profile and trend of
 // one topic's rate metric over the window.
 type ThroughputReport struct {
