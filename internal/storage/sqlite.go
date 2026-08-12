@@ -117,7 +117,206 @@ func (s *SQLiteStore) QueryDaily(ctx context.Context, params QueryParams) ([]Met
 }
 
 func (s *SQLiteStore) Rollup(ctx context.Context, resolution string) error {
-	return nil // TODO: implement
+	t, err := rollupTargets(resolution)
+	if err != nil {
+		return err
+	}
+
+	// Watermark: start from the newest already-aggregated bucket so re-runs
+	// re-compute the last (possibly still growing) bucket in full; a first
+	// run has no watermark and processes everything.
+	var watermark int64 = 1
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(bucket) FROM `+t.dst,
+	).Scan(&watermark); err == nil {
+		watermark = t.trunc(watermark)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	valueStmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+		SELECT %[4]s FROM %[1]s
+		WHERE (%[2]s/%[3]d)*%[3]d = ?
+		  AND cluster_id = ? AND metric = ? AND entity_type = ? AND entity_name = ? AND tags = ?`,
+		t.src, t.tsCol, t.div, t.valueCol))
+	if err != nil {
+		return err
+	}
+	defer valueStmt.Close()
+
+	upsertStmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+		INSERT INTO %[1]s (bucket, cluster_id, metric, entity_type, entity_name, tags,
+		                   avg, min, max, p50, p95, p99, count, sum)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(bucket, cluster_id, metric, entity_type, entity_name, tags)
+		DO UPDATE SET avg=excluded.avg, min=excluded.min, max=excluded.max,
+		              p50=excluded.p50, p95=excluded.p95, p99=excluded.p99,
+		              count=excluded.count, sum=excluded.sum`, t.dst))
+	if err != nil {
+		return err
+	}
+	defer upsertStmt.Close()
+
+	const batchSize = 500
+	for offset := 0; ; offset += batchSize {
+		groups, err := s.rollupGroups(ctx, tx, t, watermark, batchSize, offset)
+		if err != nil {
+			return err
+		}
+		for _, g := range groups {
+			values, count, sum, err := s.rollupValues(valueStmt, t, g)
+			if err != nil {
+				return err
+			}
+			aggs, err := computeAggregate(values, count, sum)
+			if err != nil {
+				return fmt.Errorf("rollup %s %s/%s/%s bucket %d: %w",
+					resolution, g.metric, g.entityType, g.entityName, g.bucket, err)
+			}
+			if _, err := upsertStmt.ExecContext(ctx,
+				g.bucket, g.clusterID, g.metric, g.entityType, g.entityName, g.tags,
+				aggs.avg, aggs.min, aggs.max, aggs.p50, aggs.p95, aggs.p99, aggs.count, aggs.sum,
+			); err != nil {
+				return err
+			}
+		}
+		if len(groups) < batchSize {
+			break
+		}
+	}
+
+	return tx.Commit()
+}
+
+const hourMs = 3600000
+const dayMs = 86400000
+
+// rollupSpec describes one rollup pass: source and destination tables, the
+// source timestamp column, and the bucket truncation.
+type rollupSpec struct {
+	src, dst, tsCol, valueCol string
+	div                       int64
+	trunc                     func(int64) int64
+}
+
+// rollupTargets resolves a rollup resolution to its source and destination
+// tables, timestamp column, and bucket truncation function.
+func rollupTargets(resolution string) (rollupSpec, error) {
+	var t rollupSpec
+	switch resolution {
+	case "hourly":
+		t.src, t.dst, t.tsCol, t.valueCol, t.div = "raw_metrics", "hourly_metrics", "ts", "value", hourMs
+	case "daily":
+		// Daily aggregates the hourly avg values (count/sum columns are
+		// summed separately so daily totals stay exact).
+		t.src, t.dst, t.tsCol, t.valueCol, t.div = "hourly_metrics", "daily_metrics", "bucket", "avg, count, sum", dayMs
+	default:
+		return t, fmt.Errorf("invalid rollup resolution %q", resolution)
+	}
+	t.trunc = func(ms int64) int64 { return (ms / t.div) * t.div }
+	return t, nil
+}
+
+type rollupGroup struct {
+	bucket     int64
+	clusterID  string
+	metric     string
+	entityType string
+	entityName string
+	tags       string
+}
+
+// rollupGroups fetches one batch of (bucket, identity, tags) groups from the
+// source table, bounded by the watermark and batchSize.
+func (s *SQLiteStore) rollupGroups(ctx context.Context, tx *sql.Tx, t rollupSpec, watermark int64, batchSize, offset int) ([]rollupGroup, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT (%[2]s/%[3]d)*%[3]d AS bucket, cluster_id, metric, entity_type, entity_name, tags
+		FROM %[1]s
+		WHERE %[2]s >= ?
+		GROUP BY bucket, cluster_id, metric, entity_type, entity_name, tags
+		ORDER BY bucket, cluster_id, metric, entity_type, entity_name, tags
+		LIMIT ? OFFSET ?`, t.src, t.tsCol, t.div), watermark, batchSize, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []rollupGroup
+	for rows.Next() {
+		var g rollupGroup
+		if err := rows.Scan(&g.bucket, &g.clusterID, &g.metric, &g.entityType, &g.entityName, &g.tags); err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+// rollupValues loads the source rows for one aggregation group. For the
+// hourly pass the source row value is the raw metric; for the daily pass it
+// is the hourly avg, with count and sum propagated for exact totals.
+func (s *SQLiteStore) rollupValues(stmt *sql.Stmt, t rollupSpec, g rollupGroup) (values []float64, count int64, sum float64, err error) {
+	rows, err := stmt.Query(g.bucket, g.clusterID, g.metric, g.entityType, g.entityName, g.tags)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	if t.dst == "daily_metrics" {
+		for rows.Next() {
+			var v, c, sm float64
+			if err := rows.Scan(&v, &c, &sm); err != nil {
+				return nil, 0, 0, err
+			}
+			values = append(values, v)
+			count += int64(c)
+			sum += sm
+		}
+	} else {
+		for rows.Next() {
+			var v float64
+			if err := rows.Scan(&v); err != nil {
+				return nil, 0, 0, err
+			}
+			values = append(values, v)
+			sum += v
+		}
+		count = int64(len(values))
+	}
+	return values, count, sum, rows.Err()
+}
+
+type aggregate struct {
+	avg, min, max, p50, p95, p99 float64
+	count                        int64
+	sum                          float64
+}
+
+func computeAggregate(values []float64, count int64, sum float64) (aggregate, error) {
+	var out aggregate
+	if len(values) == 0 || count == 0 {
+		return out, fmt.Errorf("no values")
+	}
+	out.min, out.max = values[0], values[0]
+	for _, v := range values {
+		if v < out.min {
+			out.min = v
+		}
+		if v > out.max {
+			out.max = v
+		}
+	}
+	out.count = count
+	out.sum = sum
+	out.avg = out.sum / float64(out.count)
+	ps, err := percentiles(values, []float64{0.5, 0.95, 0.99})
+	if err != nil {
+		return out, err
+	}
+	out.p50, out.p95, out.p99 = ps[0.5], ps[0.95], ps[0.99]
+	return out, nil
 }
 
 func (s *SQLiteStore) Purge(ctx context.Context, retention Retention) error {

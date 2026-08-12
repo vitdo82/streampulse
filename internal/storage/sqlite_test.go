@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,4 +52,164 @@ func TestNewSQLiteStoreWalMode(t *testing.T) {
 	var mode string
 	require.NoError(t, s.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode))
 	assert.Equal(t, "wal", mode, "file-backed store must run in WAL mode")
+}
+
+func seedMetric(t *testing.T, s *SQLiteStore, ts time.Time, value float64) {
+	t.Helper()
+	require.NoError(t, s.WriteBatch(context.Background(), []Metric{
+		{TS: ts, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: value},
+	}))
+}
+
+func scanAggregate(t *testing.T, s *SQLiteStore, table string, bucket int64) MetricRow {
+	t.Helper()
+	var r MetricRow
+	var ts int64
+	var tags string
+	err := s.db.QueryRow(`SELECT bucket, cluster_id, metric, entity_type, entity_name, tags,
+		avg, min, max, p50, p95, p99, count, sum FROM `+table+` WHERE bucket = ?`, bucket,
+	).Scan(&ts, &r.ClusterID, &r.Metric, &r.EntityType, &r.EntityName,
+		&tags, &r.Avg, &r.Min, &r.Max, &r.P50, &r.P95, &r.P99, &r.Count, &r.Sum)
+	require.NoError(t, err)
+	r.TimeStart = time.UnixMilli(ts).UTC()
+	require.NoError(t, json.Unmarshal([]byte(tags), &r.Tags))
+	if len(r.Tags) == 0 {
+		r.Tags = nil
+	}
+	return r
+}
+
+func TestRollupHourly(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	// Hour A: values 10, 20, 30.
+	for i, v := range []float64{10, 20, 30} {
+		seedMetric(t, s, base.Add(time.Duration(i)*15*time.Minute), v)
+	}
+	// Hour B: values 40, 50, 60.
+	for i, v := range []float64{40, 50, 60} {
+		seedMetric(t, s, base.Add(time.Hour+time.Duration(i)*15*time.Minute), v)
+	}
+
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+
+	hourA := scanAggregate(t, s, "hourly_metrics", base.UnixMilli())
+	assert.Equal(t, MetricRow{
+		TimeStart: base, ClusterID: "c1", Metric: "msg_rate",
+		EntityType: "topic", EntityName: "orders",
+		Avg: 20, Min: 10, Max: 30, P50: 20, P95: 30, P99: 30, Count: 3, Sum: 60,
+	}, hourA)
+
+	hourB := scanAggregate(t, s, "hourly_metrics", base.Add(time.Hour).UnixMilli())
+	assert.Equal(t, MetricRow{
+		TimeStart: base.Add(time.Hour), ClusterID: "c1", Metric: "msg_rate",
+		EntityType: "topic", EntityName: "orders",
+		Avg: 50, Min: 40, Max: 60, P50: 50, P95: 60, P99: 60, Count: 3, Sum: 150,
+	}, hourB)
+
+	// Idempotency: a second run must produce identical rows.
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	var count int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM hourly_metrics`).Scan(&count))
+	assert.Equal(t, 2, count)
+	assert.Equal(t, hourA, scanAggregate(t, s, "hourly_metrics", base.UnixMilli()))
+	assert.Equal(t, hourB, scanAggregate(t, s, "hourly_metrics", base.Add(time.Hour).UnixMilli()))
+}
+
+func TestRollupHourlyTagsGroupedSeparately(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.WriteBatch(context.Background(), []Metric{
+		{TS: base, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Tags: map[string]string{"a": "1"}, Value: 10},
+		{TS: base.Add(30 * time.Minute), ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Tags: map[string]string{"a": "1"}, Value: 20},
+		{TS: base, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Tags: map[string]string{"a": "2"}, Value: 100},
+	}))
+
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	assert.Equal(t, 2, len(aggregateRows(t, s, "hourly_metrics")))
+}
+
+func aggregateRows(t *testing.T, s *SQLiteStore, table string) []MetricRow {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT bucket, cluster_id, metric, entity_type, entity_name, tags,
+		avg, min, max, p50, p95, p99, count, sum FROM ` + table + ` ORDER BY bucket`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []MetricRow
+	for rows.Next() {
+		var r MetricRow
+		var ts int64
+		var tags string
+		require.NoError(t, rows.Scan(&ts, &r.ClusterID, &r.Metric, &r.EntityType, &r.EntityName,
+			&tags, &r.Avg, &r.Min, &r.Max, &r.P50, &r.P95, &r.P99, &r.Count, &r.Sum))
+		r.TimeStart = time.UnixMilli(ts).UTC()
+		require.NoError(t, json.Unmarshal([]byte(tags), &r.Tags))
+	if len(r.Tags) == 0 {
+		r.Tags = nil
+	}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestRollupDailyFromHourly(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	day1 := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	day2 := day1.Add(24 * time.Hour)
+	// Day 1: values 1, 2, 3 at 10:00/11:00/12:00.
+	for i, v := range []float64{1, 2, 3} {
+		seedMetric(t, s, day1.Add(time.Duration(i)*time.Hour), v)
+	}
+	// Day 2: values 10, 20, 30.
+	for i, v := range []float64{10, 20, 30} {
+		seedMetric(t, s, day2.Add(time.Duration(i)*time.Hour), v)
+	}
+
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+
+	d1 := scanAggregate(t, s, "daily_metrics", day1.Truncate(24*time.Hour).UnixMilli())
+	assert.Equal(t, MetricRow{
+		TimeStart: day1.Truncate(24 * time.Hour), ClusterID: "c1", Metric: "msg_rate",
+		EntityType: "topic", EntityName: "orders",
+		Avg: 2, Min: 1, Max: 3, P50: 2, P95: 3, P99: 3, Count: 3, Sum: 6,
+	}, d1)
+	d2 := scanAggregate(t, s, "daily_metrics", day2.Truncate(24*time.Hour).UnixMilli())
+	assert.Equal(t, MetricRow{
+		TimeStart: day2.Truncate(24 * time.Hour), ClusterID: "c1", Metric: "msg_rate",
+		EntityType: "topic", EntityName: "orders",
+		Avg: 20, Min: 10, Max: 30, P50: 20, P95: 30, P99: 30, Count: 3, Sum: 60,
+	}, d2)
+
+	// Idempotent re-run.
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+	assert.Equal(t, 2, len(aggregateRows(t, s, "daily_metrics")))
+}
+
+func TestRollupRejectsUnknownResolution(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	err = s.Rollup(context.Background(), "weekly")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid rollup resolution "weekly"`)
+}
+
+func TestRollupEmptyStore(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+	assert.Empty(t, aggregateRows(t, s, "hourly_metrics"))
+	assert.Empty(t, aggregateRows(t, s, "daily_metrics"))
 }
