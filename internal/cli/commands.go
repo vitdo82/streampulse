@@ -57,7 +57,7 @@ func newServeCommand() *cobra.Command {
 			}
 			defer client.Close()
 
-			d := daemon.New(cfg, store, client)
+			d := daemon.NewWithOptions(cfg, store, client, daemon.Options{Version: cmd.Root().Version})
 
 			// SIGTERM/SIGINT cancel the daemon context; a second signal
 			// takes the immediate-exit path (signal.NotifyContext stops

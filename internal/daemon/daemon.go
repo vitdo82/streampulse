@@ -34,6 +34,9 @@ type Daemon struct {
 	client  *kafka.Client
 	scraper Scraper
 
+	stats *ScrapeStats
+	prom  *PromServer
+
 	scraping atomic.Bool // in-flight guard for the scrape loop
 
 	mu      sync.Mutex // guards cancel
@@ -43,27 +46,48 @@ type Daemon struct {
 	wg      sync.WaitGroup
 }
 
+// Options configures the daemon.
+type Options struct {
+	// Version is the daemon build version, exposed via
+	// streampulse_build_info on the Prometheus endpoint.
+	Version string
+}
+
 // New creates a Daemon around the store and kafka client. The client is
 // borrowed: the caller owns it and is responsible for Close.
 func New(cfg *config.Config, store storage.MetricsStore, client *kafka.Client) *Daemon {
+	return NewWithOptions(cfg, store, client, Options{})
+}
+
+// NewWithOptions creates a Daemon with explicit options.
+func NewWithOptions(cfg *config.Config, store storage.MetricsStore, client *kafka.Client, opts Options) *Daemon {
 	interval, _ := cfg.ParseScrapeInterval()
+	stats := NewScrapeStats()
 	return &Daemon{
 		cfg:     cfg,
 		store:   store,
 		client:  client,
 		scraper: scraper.New(cfg.ClusterID, client, store, interval),
+		stats:   stats,
+		prom:    NewPromServer(&cfg.Prometheus, stats, PromOptions{Version: opts.Version}),
 		stopped: make(chan struct{}),
 	}
 }
 
 // Run blocks until ctx is canceled (or Shutdown is called), then waits for
-// all loops to exit and returns nil.
+// all loops to exit and returns nil. The Prometheus endpoint starts on entry
+// and is shut down by Shutdown.
 func (d *Daemon) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	d.mu.Lock()
 	d.cancel = cancel
 	d.mu.Unlock()
 
+	if d.prom != nil {
+		if err := d.prom.Start(); err != nil {
+			slog.Error("prometheus endpoint", "err", err)
+		}
+	}
 	d.startLoops(runCtx) // registers all loop goroutines synchronously
 	d.wg.Wait()          // loops exit when runCtx is canceled
 	close(d.stopped)
@@ -80,6 +104,11 @@ func (d *Daemon) Shutdown() error {
 		d.mu.Unlock()
 		if cancel != nil {
 			cancel()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if d.prom != nil {
+			_ = d.prom.Shutdown(ctx)
 		}
 		select {
 		case <-d.stopped:

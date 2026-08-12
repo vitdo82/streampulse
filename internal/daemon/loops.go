@@ -36,9 +36,19 @@ func (d *Daemon) scrapeOnce(ctx context.Context) {
 	}()
 }
 
-// doScrape performs one scrape cycle and records its outcome.
+// doScrape performs one scrape cycle and records its outcome in the
+// Prometheus scrape statistics.
 func (d *Daemon) doScrape(ctx context.Context) {
-	if err := d.scraper.ScrapeAndStore(ctx); err != nil {
+	start := time.Now()
+	err := d.scraper.ScrapeAndStore(ctx)
+	if d.stats != nil {
+		d.stats.ScrapesTotal.Inc()
+		d.stats.ScrapeDuration.Observe(time.Since(start).Seconds())
+	}
+	if err != nil {
+		if d.stats != nil {
+			d.stats.ScrapeErrorsTotal.Inc()
+		}
 		slog.Error("scrape failed", "err", err)
 	}
 }
