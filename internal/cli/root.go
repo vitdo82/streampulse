@@ -31,6 +31,9 @@ Single binary. Zero dependencies. All views auto-refresh — no manual reload.
 			if err != nil {
 				return err
 			}
+			if err := validateAlertConditions(cfg); err != nil {
+				return err
+			}
 			cmd.SetContext(context.WithValue(cmd.Context(), cfgKey{}, cfg))
 			return nil
 		},

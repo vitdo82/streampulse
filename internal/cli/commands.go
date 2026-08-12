@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/pulsedev/streampulse/internal/alerts"
 	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/check"
 	"github.com/pulsedev/streampulse/internal/config"
@@ -23,6 +24,22 @@ import (
 	"github.com/pulsedev/streampulse/internal/tui"
 	"github.com/spf13/cobra"
 )
+
+// validateAlertConditions checks that every configured alert rule condition
+// parses, so a typo fails at startup instead of silently keeping the builtin
+// rule or erroring mid-run. An empty condition is allowed: it keeps the
+// builtin condition (see alerts.MergeRules).
+func validateAlertConditions(cfg *config.Config) error {
+	for _, r := range cfg.Alerts {
+		if r.Condition == "" {
+			continue
+		}
+		if _, err := alerts.ParseCondition(r.Condition); err != nil {
+			return fmt.Errorf("alert rule %q: %w", r.Name, err)
+		}
+	}
+	return nil
+}
 
 // newKafkaClient builds the kafka client for cfg, applying the TLS and SASL
 // settings from the kafka config section.
