@@ -299,6 +299,22 @@ func TestListConsumerGroupsNoBrokers(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestUnderReplicatedCount(t *testing.T) {
+	partitions := []kafka.Partition{
+		{Topic: "orders", ID: 0, Replicas: []kafka.Broker{{ID: 0}, {ID: 1}, {ID: 2}}, Isr: []kafka.Broker{{ID: 0}, {ID: 1}, {ID: 2}}},
+		{Topic: "orders", ID: 1, Replicas: []kafka.Broker{{ID: 0}, {ID: 1}, {ID: 2}}, Isr: []kafka.Broker{{ID: 0}}},
+		{Topic: "payments", ID: 0, Replicas: []kafka.Broker{{ID: 0}, {ID: 1}}, Isr: []kafka.Broker{{ID: 0}, {ID: 1}}},
+		{Topic: "audit", ID: 0, Replicas: []kafka.Broker{{ID: 0}, {ID: 1}}, Isr: []kafka.Broker{{ID: 0}}},
+		// A partition whose metadata fetch errored is not counted.
+		{Topic: "errored", ID: 0, Replicas: []kafka.Broker{{ID: 0}, {ID: 1}}, Isr: []kafka.Broker{{ID: 0}}, Error: fmt.Errorf("leader not available")},
+	}
+	assert.Equal(t, 2, underReplicatedCount(partitions))
+}
+
+func TestUnderReplicatedCountEmpty(t *testing.T) {
+	assert.Equal(t, 0, underReplicatedCount(nil))
+}
+
 func TestPartitionsToTopicsSkipsErroredPartitions(t *testing.T) {
 	partitions := []kafka.Partition{
 		{Topic: "orders", ID: 0, Error: fmt.Errorf("leader not available")},

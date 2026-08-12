@@ -16,6 +16,7 @@ func TestParseCondition(t *testing.T) {
 		wantErr bool
 	}{
 		{"lag > 1000", "kafka.group.lag", ">", 1000, false},
+		{"under_replicated > 0", "kafka.cluster.under_replicated_partitions", ">", 0, false},
 		{"replica == leader", "replica", "==", 0, true}, // two identifiers → unsupported
 		{"lag >", "", "", 0, true},
 		{"growth_rate >= 10.5", "dlq.topic.growth_rate", ">=", 10.5, false},

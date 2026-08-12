@@ -284,21 +284,19 @@ func checkRetention(topic string, minHours float64) Check {
 
 const hoursToMS = float64(1000 * 60 * 60)
 
-// runReplication verifies no broker hosts more partition replicas than it
-// leads, which would indicate under-replicated partitions.
+// runReplication verifies no partition is under-replicated: every replica
+// must be in sync (ISR == full replica set).
 func runReplication(ctx context.Context, env Env) (Result, error) {
 	cluster, err := env.Client.DescribeCluster(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("describe cluster: %w", err)
 	}
-	var problems []string
-	for _, b := range cluster.Brokers {
-		if b.ReplicaPartitions > b.LeaderPartitions {
-			problems = append(problems, fmt.Sprintf("broker %d (replicas %d, leaders %d)", b.ID, b.ReplicaPartitions, b.LeaderPartitions))
-		}
+	if cluster.UnderReplicatedPartitions > 0 {
+		return Result{
+			Status:  StatusFail,
+			Message: fmt.Sprintf("%d under-replicated partitions", cluster.UnderReplicatedPartitions),
+			Value:   float64(cluster.UnderReplicatedPartitions),
+		}, nil
 	}
-	if len(problems) > 0 {
-		return Result{Status: StatusFail, Message: strings.Join(problems, "; "), Value: float64(len(problems))}, nil
-	}
-	return Result{Status: StatusPass, Message: "all brokers lead the partitions they host"}, nil
+	return Result{Status: StatusPass, Message: "all partitions fully replicated"}, nil
 }

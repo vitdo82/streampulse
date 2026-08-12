@@ -213,7 +213,7 @@ Exit codes:
 	cmd.Flags().IntVar(&minPartitions, "min-partitions", check.DefaultMinPartitions, "Minimum partitions per topic")
 	cmd.Flags().Int64Var(&maxLag, "max-lag", check.DefaultMaxLag, "Maximum total consumer lag per group")
 	cmd.Flags().Float64Var(&minRetentionHours, "min-retention-hours", 0, "Minimum topic retention in hours (checked per topic)")
-	cmd.Flags().BoolVar(&checkReplication, "check-replication", false, "Fail when any broker replicates more partitions than it leads")
+	cmd.Flags().BoolVar(&checkReplication, "check-replication", false, "Fail when any partition is under-replicated (ISR smaller than replica set)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Overall deadline for the check run")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output results and verdict as JSON")
 	return cmd

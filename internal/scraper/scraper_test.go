@@ -128,7 +128,8 @@ func TestMetricNames(t *testing.T) {
 func TestBrokerCollector(t *testing.T) {
 	now := time.Now()
 	client := &fakeClient{cluster: &kafka.ClusterInfo{
-		ControllerID: 1,
+		ControllerID:              1,
+		UnderReplicatedPartitions: 2,
 		Brokers: []kafka.BrokerInfo{
 			{Host: "broker-1", Port: 9092, ID: 1, LeaderPartitions: 4, ReplicaPartitions: 6},
 			{Host: "broker-2", Port: 9093, ID: 2, LeaderPartitions: 2, ReplicaPartitions: 3},
@@ -138,13 +139,21 @@ func TestBrokerCollector(t *testing.T) {
 
 	metrics, err := c.Collect(context.Background(), now)
 	require.NoError(t, err)
-	require.Len(t, metrics, 4)
+	require.Len(t, metrics, 5)
+
+	// One cluster-level metric: the under-replicated partition count.
+	under, ok := metricWithEntityType(metrics, MetricClusterUnderReplicatedPartitions, "cluster")
+	require.True(t, ok)
+	assert.Equal(t, "cluster", under.EntityName)
+	assert.Equal(t, 2.0, under.Value)
 
 	got := make(map[string]map[string]float64)
 	for _, m := range metrics {
+		if m.EntityType != "broker" {
+			continue
+		}
 		assert.Equal(t, now, m.TS)
 		assert.Equal(t, testClusterID, m.ClusterID)
-		assert.Equal(t, "broker", m.EntityType)
 		if got[m.EntityName] == nil {
 			got[m.EntityName] = make(map[string]float64)
 		}
@@ -156,13 +165,27 @@ func TestBrokerCollector(t *testing.T) {
 	assert.Equal(t, 3.0, got["broker-2:9093"][MetricBrokerReplicaPartitions])
 }
 
+func TestBrokerCollectorNoUnderReplicated(t *testing.T) {
+	client := &fakeClient{cluster: &kafka.ClusterInfo{
+		ControllerID: 1,
+		Brokers:      []kafka.BrokerInfo{{Host: "broker-1", Port: 9092, ID: 1, LeaderPartitions: 4, ReplicaPartitions: 6}},
+	}}
+	c := newBrokerCollector(client, testClusterID)
+
+	metrics, err := c.Collect(context.Background(), time.Now())
+	require.NoError(t, err)
+	under, ok := metricWithEntityType(metrics, MetricClusterUnderReplicatedPartitions, "cluster")
+	require.True(t, ok)
+	assert.Equal(t, 0.0, under.Value)
+}
+
 func TestBrokerCollectorOfflineBrokerName(t *testing.T) {
 	client := &fakeClient{cluster: &kafka.ClusterInfo{Brokers: []kafka.BrokerInfo{{ID: 3, LeaderPartitions: 1, ReplicaPartitions: 1}}}}
 	c := newBrokerCollector(client, testClusterID)
 
 	metrics, err := c.Collect(context.Background(), time.Now())
 	require.NoError(t, err)
-	require.Len(t, metrics, 2)
+	require.Len(t, metrics, 3)
 	assert.Equal(t, "3", metrics[0].EntityName)
 }
 
@@ -327,6 +350,17 @@ func metricWithTags(ms []storage.Metric, name string, tags map[string]string) (s
 			}
 		}
 		if match {
+			return m, true
+		}
+	}
+	return storage.Metric{}, false
+}
+
+// metricWithEntityType finds the first metric with the given name and entity
+// type.
+func metricWithEntityType(ms []storage.Metric, name, entityType string) (storage.Metric, bool) {
+	for _, m := range ms {
+		if m.Metric == name && m.EntityType == entityType {
 			return m, true
 		}
 	}

@@ -49,7 +49,8 @@ func brokerDownRule() Rule {
 func underReplicatedRule() Rule {
 	return Rule{
 		Name: "under-replicated", Severity: "critical",
-		EntityType: "broker", For: 2 * time.Minute, RepeatInterval: time.Hour,
+		Condition: mustCondition("under_replicated > 0"), EntityType: "cluster",
+		For: 2 * time.Minute, RepeatInterval: time.Hour,
 	}
 }
 
@@ -72,9 +73,7 @@ func TestBuiltinRules(t *testing.T) {
 		assert.NotEmpty(t, r.Severity)
 		assert.NotEmpty(t, r.EntityType)
 		assert.True(t, r.RepeatInterval > 0)
-		if r.Name != "under-replicated" {
-			require.NotNil(t, r.Condition, "rule %q must have a parsed condition", r.Name)
-		}
+		require.NotNil(t, r.Condition, "rule %q must have a parsed condition", r.Name)
 	}
 }
 
@@ -152,25 +151,32 @@ func TestEngineUnderReplicated(t *testing.T) {
 	ctx := context.Background()
 	now := testTime()
 
-	skewed := []storage.Metric{
+	// A healthy RF>=2 cluster: every broker hosts more replicas than it leads
+	// (the old heuristic) but the cluster reports no under-replicated
+	// partitions — the rule must not fire.
+	healthy := []storage.Metric{
 		{EntityType: "broker", EntityName: "b1", Metric: "kafka.broker.replica_partitions", Value: 5},
 		{EntityType: "broker", EntityName: "b1", Metric: "kafka.broker.leader_partitions", Value: 3},
-		{EntityType: "broker", EntityName: "b2", Metric: "kafka.broker.replica_partitions", Value: 3},
+		{EntityType: "broker", EntityName: "b2", Metric: "kafka.broker.replica_partitions", Value: 5},
 		{EntityType: "broker", EntityName: "b2", Metric: "kafka.broker.leader_partitions", Value: 3},
+		{EntityType: "cluster", EntityName: "cluster", Metric: "kafka.cluster.under_replicated_partitions", Value: 0},
 	}
-	require.NoError(t, eng.Evaluate(ctx, skewed, now))
+	require.NoError(t, eng.Evaluate(ctx, healthy, now))
 	s, _ := eng.State("under-replicated")
-	assert.Equal(t, "pending", s.Status, "b1 replicates 5 but leads 3")
+	assert.Equal(t, "ok", s.Status, "replica>leader per broker is normal on multi-broker clusters")
 
-	require.NoError(t, eng.Evaluate(ctx, skewed, now.Add(2*time.Minute)))
+	under := []storage.Metric{
+		{EntityType: "cluster", EntityName: "cluster", Metric: "kafka.cluster.under_replicated_partitions", Value: 2},
+	}
+	require.NoError(t, eng.Evaluate(ctx, under, now))
+	s, _ = eng.State("under-replicated")
+	assert.Equal(t, "pending", s.Status, "2 under-replicated partitions")
+
+	require.NoError(t, eng.Evaluate(ctx, under, now.Add(2*time.Minute)))
 	s, _ = eng.State("under-replicated")
 	assert.Equal(t, "firing", s.Status)
 
-	balanced := []storage.Metric{
-		{EntityType: "broker", EntityName: "b1", Metric: "kafka.broker.replica_partitions", Value: 3},
-		{EntityType: "broker", EntityName: "b1", Metric: "kafka.broker.leader_partitions", Value: 3},
-	}
-	require.NoError(t, eng.Evaluate(ctx, balanced, now.Add(3*time.Minute)))
+	require.NoError(t, eng.Evaluate(ctx, healthy, now.Add(3*time.Minute)))
 	s, _ = eng.State("under-replicated")
 	assert.Equal(t, "ok", s.Status)
 }

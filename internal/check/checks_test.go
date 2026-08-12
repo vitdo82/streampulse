@@ -309,6 +309,7 @@ func TestRetentionCheckConfigError(t *testing.T) {
 func TestReplicationCheckPass(t *testing.T) {
 	env := Env{
 		Client: &fakeClient{cluster: &kafka.ClusterInfo{
+			UnderReplicatedPartitions: 0,
 			Brokers: []kafka.BrokerInfo{{ID: 0, LeaderPartitions: 6, ReplicaPartitions: 6}},
 		}},
 		Flags: Flags{CheckReplication: true},
@@ -324,6 +325,7 @@ func TestReplicationCheckPass(t *testing.T) {
 func TestReplicationCheckUnderReplicated(t *testing.T) {
 	env := Env{
 		Client: &fakeClient{cluster: &kafka.ClusterInfo{
+			UnderReplicatedPartitions: 2,
 			Brokers: []kafka.BrokerInfo{
 				{ID: 0, LeaderPartitions: 6, ReplicaPartitions: 6},
 				{ID: 1, LeaderPartitions: 2, ReplicaPartitions: 8},
@@ -335,8 +337,29 @@ func TestReplicationCheckUnderReplicated(t *testing.T) {
 
 	require.Len(t, results, 2)
 	assert.Equal(t, StatusFail, results[1].Status)
-	assert.Contains(t, results[1].Message, "broker 1")
+	assert.Contains(t, results[1].Message, "2 under-replicated partitions")
 	assert.Equal(t, 1, Verdict(results))
+}
+
+func TestReplicationCheckHealthyMultiBrokerCluster(t *testing.T) {
+	// A healthy RF>=2 cluster: brokers host more replicas than they lead, but
+	// every partition is fully replicated — the check must pass.
+	env := Env{
+		Client: &fakeClient{cluster: &kafka.ClusterInfo{
+			UnderReplicatedPartitions: 0,
+			Brokers: []kafka.BrokerInfo{
+				{ID: 0, LeaderPartitions: 4, ReplicaPartitions: 12},
+				{ID: 1, LeaderPartitions: 4, ReplicaPartitions: 12},
+				{ID: 2, LeaderPartitions: 4, ReplicaPartitions: 12},
+			},
+		}},
+		Flags: Flags{CheckReplication: true},
+	}
+	results := RunAll(context.Background(), env)
+
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusPass, results[1].Status, "replica>leader per broker is normal on multi-broker clusters")
+	assert.Equal(t, 0, Verdict(results))
 }
 
 func TestReplicationCheckClusterError(t *testing.T) {

@@ -20,12 +20,13 @@ type Condition struct {
 
 // metricAliases maps short condition names to full scraper metric names.
 var metricAliases = map[string]string{
-	"lag":         "kafka.group.lag",
-	"replica":     "kafka.broker.replica_partitions",
-	"leader":      "kafka.broker.leader_partitions",
-	"growth_rate": "dlq.topic.growth_rate",
-	"up":          "kafka.broker.up",
-	"skew":        "kafka.cluster.partition_skew",
+	"lag":              "kafka.group.lag",
+	"replica":          "kafka.broker.replica_partitions",
+	"leader":           "kafka.broker.leader_partitions",
+	"growth_rate":      "dlq.topic.growth_rate",
+	"up":               "kafka.broker.up",
+	"skew":             "kafka.cluster.partition_skew",
+	"under_replicated": "kafka.cluster.under_replicated_partitions",
 	// Daemon-internal counters evaluated by the engine, not part of the
 	// scraper batch; registered so conditions can reference them.
 	"scrape_errors_total": "scrape_errors_total",

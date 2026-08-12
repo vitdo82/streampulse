@@ -27,13 +27,14 @@ func (b *brokerCollector) Collect(ctx context.Context, now time.Time) ([]storage
 	if err != nil {
 		return nil, fmt.Errorf("describe cluster: %w", err)
 	}
-	metrics := make([]storage.Metric, 0, len(info.Brokers)*2)
+	metrics := make([]storage.Metric, 0, len(info.Brokers)*2+1)
 	for _, br := range info.Brokers {
 		metrics = append(metrics,
 			storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricBrokerLeaderPartitions, EntityType: "broker", EntityName: brokerName(br), Value: float64(br.LeaderPartitions)},
 			storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricBrokerReplicaPartitions, EntityType: "broker", EntityName: brokerName(br), Value: float64(br.ReplicaPartitions)},
 		)
 	}
+	metrics = append(metrics, storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricClusterUnderReplicatedPartitions, EntityType: "cluster", EntityName: "cluster", Value: float64(info.UnderReplicatedPartitions)})
 	return metrics, nil
 }
 

@@ -26,9 +26,6 @@ type Rule struct {
 
 // BuiltinRules returns the six default v0.1 rules (alerts.md rule table).
 // Rules are overridable by config entries matched on Name (see MergeRules).
-// "under-replicated" compares two metrics per broker (replica vs leader), a
-// comparison outside the single-metric condition language, so its Condition
-// is nil and the engine evaluates it specially.
 func BuiltinRules() []Rule {
 	return []Rule{
 		{
@@ -38,7 +35,8 @@ func BuiltinRules() []Rule {
 		},
 		{
 			Name: "under-replicated", Severity: "critical",
-			EntityType: "broker", For: 2 * time.Minute, RepeatInterval: time.Hour,
+			Condition: mustCondition("under_replicated > 0"), EntityType: "cluster",
+			For: 2 * time.Minute, RepeatInterval: time.Hour,
 		},
 		{
 			Name: "consumer-lag", Severity: "warning",
@@ -236,8 +234,6 @@ func (r *engineRule) evalMetrics(metrics []storage.Metric, noBrokerCycles int) (
 	case "scrape-failing":
 		// Fires once the scrape has failed for 3 consecutive cycles.
 		return noBrokerCycles >= 3, float64(noBrokerCycles), ""
-	case "under-replicated":
-		return r.underReplicated(metrics)
 	default:
 		if r.Condition == nil {
 			return false, 0, ""
@@ -259,31 +255,6 @@ func (r *engineRule) evalMetrics(metrics []storage.Metric, noBrokerCycles int) (
 		}
 		return found, maxVal, entity
 	}
-}
-
-// underReplicated fires when any broker replicates more partitions than it
-// leads (replica_partitions > leader_partitions), sustained by the For
-// window.
-func (r *engineRule) underReplicated(metrics []storage.Metric) (bool, float64, string) {
-	replicas := make(map[string]float64)
-	leaders := make(map[string]float64)
-	for _, m := range metrics {
-		if m.EntityType != "broker" {
-			continue
-		}
-		switch m.Metric {
-		case "kafka.broker.replica_partitions":
-			replicas[m.EntityName] = m.Value
-		case "kafka.broker.leader_partitions":
-			leaders[m.EntityName] = m.Value
-		}
-	}
-	for name, rep := range replicas {
-		if lead, ok := leaders[name]; ok && rep > lead {
-			return true, rep, name
-		}
-	}
-	return false, 0, ""
 }
 
 // notify dispatches a notification to all notifiers; errors are logged.

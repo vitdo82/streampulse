@@ -7,6 +7,10 @@ const (
 	// MetricBrokerReplicaPartitions counts the partitions replicated by a broker.
 	MetricBrokerReplicaPartitions = "kafka.broker.replica_partitions"
 
+	// MetricClusterUnderReplicatedPartitions counts partitions whose ISR is
+	// smaller than the replica set.
+	MetricClusterUnderReplicatedPartitions = "kafka.cluster.under_replicated_partitions"
+
 	// MetricTopicPartitionCount is the number of partitions of a topic.
 	MetricTopicPartitionCount = "kafka.topic.partition_count"
 	// MetricTopicMessages is the cumulative high-watermark message count.

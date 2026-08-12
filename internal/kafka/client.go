@@ -131,9 +131,10 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // ClusterInfo returns basic cluster metadata.
 type ClusterInfo struct {
-	BrokerCount  int
-	ControllerID int
-	Brokers      []BrokerInfo
+	BrokerCount                 int
+	ControllerID                int
+	Brokers                     []BrokerInfo
+	UnderReplicatedPartitions   int
 }
 
 // BrokerInfo holds metadata for a single Kafka broker.
@@ -195,10 +196,27 @@ func (c *Client) DescribeCluster(ctx context.Context) (*ClusterInfo, error) {
 	}
 
 	return &ClusterInfo{
-		BrokerCount:  len(brokers),
-		ControllerID: controller.ID,
-		Brokers:      brokerInfos,
+		BrokerCount:               len(brokers),
+		ControllerID:              controller.ID,
+		Brokers:                   brokerInfos,
+		UnderReplicatedPartitions: underReplicatedCount(partitions),
 	}, nil
+}
+
+// underReplicatedCount counts partitions whose ISR is smaller than the full
+// replica set: the leader is missing in-sync replicas, so the partition
+// cannot serve its full redundancy.
+func underReplicatedCount(partitions []kafka.Partition) int {
+	n := 0
+	for _, p := range partitions {
+		if p.Error != nil {
+			continue
+		}
+		if len(p.Isr) < len(p.Replicas) {
+			n++
+		}
+	}
+	return n
 }
 
 // GroupInfo holds metadata for a single consumer group.
