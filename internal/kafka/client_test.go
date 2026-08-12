@@ -60,6 +60,11 @@ func TestNewClient(t *testing.T) {
 	assert.NotNil(t, c)
 }
 
+func TestBrokersAccessor(t *testing.T) {
+	c := NewClient([]string{"localhost:9092", "kafka:9093"})
+	assert.Equal(t, []string{"localhost:9092", "kafka:9093"}, c.Brokers())
+}
+
 // generateTestCert writes a self-signed CA and a client certificate/key pair
 // (1h validity) into dir and returns their paths.
 func generateTestCert(t *testing.T, dir string) (caFile, certFile, keyFile string) {

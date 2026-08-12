@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/pulsedev/streampulse/internal/analytics"
+	"github.com/pulsedev/streampulse/internal/dlq"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/storage"
 )
@@ -122,6 +125,7 @@ type Model struct {
 
 	store       storage.MetricsStore
 	kafkaClient *kafka.Client
+	brokerAddrs []string // kafka mode: broker addresses for dlq inspect/replay
 
 	// Live data (updated every tick from store)
 	brokers        []BrokerRow
@@ -134,6 +138,10 @@ type Model struct {
 	lastUpdated time.Time
 	loading     bool
 
+	// Topic search (active while searching)
+	searching   bool
+	searchQuery string
+
 	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
@@ -143,6 +151,27 @@ type Model struct {
 
 	// Sub-views
 	logView viewport.Model
+
+	// DLQ inspect view (open while dlqView != nil)
+	dlqView    *viewport.Model
+	dlqTopic   string
+	dlqConfirm bool
+
+	// DLQ module hooks (injectable for tests)
+	discoverDLQ  func(ctx context.Context, client dlq.Client, suffixes []string) ([]dlq.Topic, error)
+	dlqInspectFn func(ctx context.Context, brokers []string, topic string, limit int) ([]dlq.Message, error)
+	dlqReplayFn  func(ctx context.Context, opts dlq.ReplayOptions) (*dlq.ReplayResult, error)
+
+	// Analytics cache (recomputed at most every 30s)
+	analytics        []analytics.GrowthReport
+	skew             []analytics.SkewReport
+	retention        []analytics.RetentionReport
+	analyticsErr     error
+	analyticsUpdated time.Time
+	selectedTopic    int
+
+	// now is the clock used for analytics staleness (injectable for tests).
+	now func() time.Time
 }
 
 // NewModel creates a TUI model connected to the daemon's store.
@@ -177,6 +206,7 @@ func NewModelWithStore(store storage.MetricsStore) *Model {
 func NewModelWithKafka(client *kafka.Client) *Model {
 	return &Model{
 		kafkaClient: client,
+		brokerAddrs: client.Brokers(),
 		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
 	}
 }
@@ -257,8 +287,35 @@ func (m *Model) loadData() DataUpdated {
 	data.Brokers = brokerRowsFromStore(latest)
 	data.Topics = topicRowsFromStore(latest)
 	data.ConsumerGroups = groupRowsFromStore(latest)
+
+	state, err := m.store.QueryAlertState(ctx)
+	if err != nil {
+		logf("alerts: %v", err)
+	} else {
+		data.Alerts = alertRowsFromStore(state)
+	}
+
+	if err := m.refreshAnalytics(ctx); err != nil {
+		logf("analytics: %v", err)
+	}
 	data.Logs = logs
 	return data
+}
+
+// alertRowsFromStore maps persisted alert states into dashboard rows. The
+// rule severity is not part of the persisted state, so it renders as "-".
+func alertRowsFromStore(state []storage.AlertStateRow) []AlertRow {
+	rows := make([]AlertRow, 0, len(state))
+	for _, s := range state {
+		row := AlertRow{Name: s.RuleName, Severity: "-", Value: fmt.Sprintf("%.1f", s.LastValue)}
+		if !s.LastFired.IsZero() {
+			row.FiredAt = s.LastFired.Format("15:04:05")
+		} else {
+			row.FiredAt = "-"
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // brokerRowsFromStore maps latest broker metrics into dashboard rows.
@@ -344,6 +401,99 @@ func groupStateName(state float64) string {
 	}
 }
 
+// ─── Analytics ─────────────────────────────────────────────────────────────
+
+const (
+	// analyticsRefreshInterval bounds how often the analytics cache is
+	// recomputed (the 2s tick only recomputes when it is stale).
+	analyticsRefreshInterval = 30 * time.Second
+	// analyticsWindow is the growth report window (daily buckets).
+	analyticsWindow = 7 * 24 * time.Hour
+	// analyticsTopN caps the growth list shown on the Analytics tab.
+	analyticsTopN = 5
+)
+
+// refreshAnalytics recomputes the analytics cache when it is older than
+// analyticsRefreshInterval. Growth needs the store, skew needs the live
+// cluster, and retention needs both; reports whose inputs are missing are
+// skipped. Report errors are isolated: a failing report never discards the
+// cached data of the others.
+func (m *Model) refreshAnalytics(ctx context.Context) error {
+	if m.store == nil && m.kafkaClient == nil {
+		return nil
+	}
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	if now().Sub(m.analyticsUpdated) <= analyticsRefreshInterval {
+		return nil
+	}
+
+	var errs []error
+	if m.store != nil {
+		a := analytics.NewAnalyzer(m.store, m.kafkaClient)
+		reports, err := a.Growth(ctx, nil, analyticsWindow)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("growth: %w", err))
+		} else {
+			m.analytics = topGrowth(reports, analyticsTopN)
+			m.selectedTopic = 0
+		}
+	}
+	if m.kafkaClient != nil {
+		a := analytics.NewAnalyzer(m.store, m.kafkaClient)
+		skew, err := a.Skew(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("skew: %w", err))
+		} else {
+			m.skew = skew
+		}
+	}
+	if m.store != nil && m.kafkaClient != nil {
+		a := analytics.NewAnalyzer(m.store, m.kafkaClient)
+		ret, err := a.Retention(ctx, growthTopicNames(m.analytics))
+		if err != nil {
+			errs = append(errs, fmt.Errorf("retention: %w", err))
+		} else {
+			m.retention = ret
+		}
+	}
+	m.analyticsErr = errors.Join(errs...)
+	m.analyticsUpdated = now()
+	return m.analyticsErr
+}
+
+// topGrowth keeps the n fastest-growing reports, ordered by delta desc.
+func topGrowth(reports []analytics.GrowthReport, n int) []analytics.GrowthReport {
+	sorted := append([]analytics.GrowthReport(nil), reports...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Delta > sorted[j].Delta })
+	if len(sorted) > n {
+		sorted = sorted[:n]
+	}
+	return sorted
+}
+
+// growthTopicNames returns the topic names of the cached growth reports.
+func growthTopicNames(reports []analytics.GrowthReport) []string {
+	names := make([]string, 0, len(reports))
+	for _, r := range reports {
+		names = append(names, r.Topic)
+	}
+	return names
+}
+
+// cycleAnalyticsSelection moves the highlighted growth topic, wrapping at
+// both ends of the cached list.
+func (m *Model) cycleAnalyticsSelection(delta int) {
+	n := len(m.analytics)
+	if n == 0 {
+		m.selectedTopic = 0
+		return
+	}
+	m.selectedTopic = (m.selectedTopic + delta + n) % n
+}
+
 func (m *Model) fetchFromKafka() DataUpdated {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -417,6 +567,17 @@ func (m *Model) fetchFromKafka() DataUpdated {
 		})
 	}
 
+	dlqs, dlqErr := m.fetchDLQ(ctx)
+	if dlqErr != nil {
+		logf("dlq discovery error: %v", dlqErr)
+		data.Failed = true
+	} else {
+		data.DLQTopics = dlqs
+	}
+
+	if err := m.refreshAnalytics(ctx); err != nil {
+		logf("analytics: %v", err)
+	}
 	data.Logs = logs
 	return data
 }
@@ -448,17 +609,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyData(msg)
 		m.buildTables()
 
+	case dlqInspectMsg:
+		m.handleDLQInspectMsg(msg)
+
+	case dlqReplayMsg:
+		m.handleDLQReplayMsg(msg)
+
 	case tea.KeyMsg:
+		if m.dlqView != nil {
+			cmds = append(cmds, m.handleDLQViewKey(msg))
+			break
+		}
+		if m.searching {
+			m.handleSearchKey(msg)
+			break
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "/":
+			m.searching = true
 		case "tab", "l", "right":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 		case "shift+tab", "h", "left":
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+		case "j", "down":
+			if m.activeTab == 5 {
+				m.cycleAnalyticsSelection(1)
+			} else if t := m.activeTable(); t != nil {
+				t.MoveDown(1)
+			}
+		case "k", "up":
+			if m.activeTab == 5 {
+				m.cycleAnalyticsSelection(-1)
+			} else if t := m.activeTable(); t != nil {
+				t.MoveUp(1)
+			}
 		case "1", "2", "3", "4", "5", "6":
 			if idx := int(msg.Runes[0] - '1'); idx < len(m.tabs) {
 				m.activeTab = idx
+			}
+		case "enter":
+			if m.activeTab == 4 && len(m.dlqTopics) > 0 {
+				topic := m.dlqTable.SelectedRow()[0]
+				cmds = append(cmds, m.openDLQView(topic))
 			}
 		case "r":
 			if !m.loading {
@@ -469,6 +663,74 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// handleDLQViewKey handles keys while the DLQ inspect view is open.
+func (m *Model) handleDLQViewKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.closeDLQView()
+	case "r":
+		m.dlqConfirm = true
+	case "y":
+		if m.dlqConfirm {
+			m.dlqConfirm = false
+			return m.dlqReplayCmd()
+		}
+	case "n":
+		m.dlqConfirm = false
+	case "j", "down":
+		m.dlqView.LineDown(1)
+	case "k", "up":
+		m.dlqView.LineUp(1)
+	}
+	return nil
+}
+
+// closeDLQView returns to the DLQ table.
+func (m *Model) closeDLQView() {
+	m.dlqView = nil
+	m.dlqTopic = ""
+	m.dlqConfirm = false
+}
+
+// handleSearchKey handles keys while topic search is active: printable runes
+// append to the query, backspace removes, enter applies (leaving the filter
+// in place), esc and q close the search.
+func (m *Model) handleSearchKey(msg tea.KeyMsg) {
+	switch msg.String() {
+	case "esc", "q":
+		m.searching = false
+		m.searchQuery = ""
+	case "enter":
+		m.searching = false
+	case "backspace":
+		if r := []rune(m.searchQuery); len(r) > 0 {
+			m.searchQuery = string(r[:len(r)-1])
+		}
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.searchQuery += string(msg.Runes)
+		}
+	}
+}
+
+// activeTable returns the table of the active tab (nil for the Analytics tab,
+// which has no table).
+func (m *Model) activeTable() *table.Model {
+	switch m.activeTab {
+	case 0:
+		return &m.brokersTable
+	case 1:
+		return &m.topicsTable
+	case 2:
+		return &m.groupsTable
+	case 3:
+		return &m.alertsTable
+	case 4:
+		return &m.dlqTable
+	}
+	return nil
 }
 
 func (m *Model) applyData(d DataUpdated) {
@@ -506,7 +768,7 @@ func (m *Model) buildTables() {
 			{Title: "BYTES/S", Width: 12},
 			{Title: "RETENTION", Width: 12},
 		},
-		rowsFromTopics(m.topics),
+		rowsFromTopics(filteredTopics(m.topics, m.searchQuery)),
 	)
 
 	m.groupsTable = buildTable(
@@ -612,6 +874,23 @@ func rowsFromDLQ(d []DLQRow) []table.Row {
 		rows[i] = table.Row{dlq.Topic, dlq.MessageCount, dlq.Growth, dlq.ErrorPattern}
 	}
 	return rows
+}
+
+// filteredTopics returns the topics matching the search query (case-insensitive
+// contains on the topic name), or all topics when no query is set. The filter
+// stays applied after Enter closes the search; Esc clears the query.
+func filteredTopics(topics []TopicRow, query string) []TopicRow {
+	if query == "" {
+		return topics
+	}
+	q := strings.ToLower(query)
+	out := make([]TopicRow, 0, len(topics))
+	for _, t := range topics {
+		if strings.Contains(strings.ToLower(t.Name), q) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ─── View ──────────────────────────────────────────────────────────────────
@@ -761,44 +1040,174 @@ func (m *Model) renderAlertsView() string {
 }
 
 func (m *Model) renderDLQView() string {
+	if m.dlqView != nil {
+		prompt := ""
+		if m.dlqConfirm {
+			prompt = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FBBF24")).
+				Render(fmt.Sprintf("Replay %s to %s? (y/n)", m.dlqTopic, strings.TrimSuffix(m.dlqTopic, ".dlq"))) + "\n"
+		}
+		return lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES — "+m.dlqTopic),
+			prompt,
+			m.dlqView.View(),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  esc: back  │  r: replay  │  y/n: confirm  │  j/k: scroll"),
+		)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES"),
 		m.dlqTable.View(),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  ENTER: inspect  │  R: replay  │  D: drain  │  A: archive"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  ENTER: inspect  │  R: replay"),
 	)
 }
 
 func (m *Model) renderAnalyticsView() string {
-	chartStyle := lipgloss.NewStyle().
+	parts := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ANALYTICS"),
+	}
+	if m.analyticsErr != nil {
+		parts = append(parts, lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#EF4444")).
+			Render("  analytics: "+m.analyticsErr.Error()))
+	}
+	parts = append(parts,
+		m.renderGrowthPane(),
+		"",
+		m.renderSkewPane(),
+		"",
+		m.renderRetentionPane(),
+	)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderGrowthPane renders the top-N topic growth sparklines, highlighting
+// the selected topic.
+func (m *Model) renderGrowthPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render(fmt.Sprintf("📈 TOPIC GROWTH (%dh)", int(analyticsWindow/time.Hour)))
+
+	width := m.width - 4
+	if width < 10 {
+		width = 80
+	}
+	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#4C1D95")).
 		Padding(1, 2).
-		Width(m.width - 4).
-		Height(8)
+		Width(width)
 
+	if len(m.analytics) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			box.Render(helpStyle.Render("no data")),
+		)
+	}
+
+	sel := m.selectedTopic
+	if sel >= len(m.analytics) {
+		sel = 0
+	}
+	lines := make([]string, 0, len(m.analytics))
+	for i, g := range m.analytics {
+		marker := "  "
+		name := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(g.Topic)
+		if i == sel {
+			marker = "▸ "
+			name = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(g.Topic)
+		}
+		lines = append(lines, fmt.Sprintf("%s%s  %s  %s %.1f msgs/s",
+			marker, name, g.Sparkline, deltaSign(g.Delta), g.Delta))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ANALYTICS"),
-		chartStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Render("📈 Topic Growth — coming in v0.1"),
-				"",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Real-time analytics powered by daemon scrape data"),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Growth charts, partition skew, retention analysis — auto-refreshing"),
-			),
-		),
+		title,
+		box.Render(lipgloss.JoinVertical(lipgloss.Left, lines...)),
 	)
 }
 
+// deltaSign prefixes a growth delta with its direction.
+func deltaSign(d float64) string {
+	if d < 0 {
+		return fmt.Sprintf("%.1f", d)
+	}
+	return fmt.Sprintf("+%.1f", d)
+}
+
+// renderSkewPane renders the cluster partition leadership distribution.
+func (m *Model) renderSkewPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render("PARTITION SKEW")
+
+	if len(m.skew) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+	}
+
+	var lines []string
+	for _, s := range m.skew {
+		ids := make([]string, 0, len(s.Leaders))
+		for id := range s.Leaders {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			lines = append(lines, fmt.Sprintf("  broker %s: %d leaders", id, s.Leaders[id]))
+		}
+		status := lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("balanced")
+		if !s.Balanced {
+			status = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render("UNBALANCED")
+		}
+		lines = append(lines, fmt.Sprintf("  max/avg ratio %.2f — %s", s.Ratio, status))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderRetentionPane renders topics whose byte-based retention estimate is
+// at risk of filling before the time-based retention.
+func (m *Model) renderRetentionPane() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#A78BFA")).
+		Padding(1, 0).
+		Render("RETENTION")
+
+	if len(m.retention) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+	}
+	lines := make([]string, 0, len(m.retention))
+	for _, r := range m.retention {
+		if !r.AtRisk {
+			continue
+		}
+		lines = append(lines, lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FBBF24")).
+			Render(fmt.Sprintf("  ⚠ %s: retention %s, fill estimate %.1f days — at risk",
+				r.Topic, r.RetentionMS, r.EstimateFillDays)))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, helpStyle.Render("  all topics within retention"))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
 func (m *Model) renderHelp() string {
+	help := "tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s"
+	if m.searching {
+		help = fmt.Sprintf("/ search: %s  │  esc: close", m.searchQuery)
+	}
 	return helpStyle.Render(
 		lipgloss.NewStyle().
 			Background(lipgloss.Color("#1F1A2E")).
 			Width(m.width).
 			Padding(0, 2).
-			Render(
-				"tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s",
-			),
+			Render(help),
 	)
 }
 

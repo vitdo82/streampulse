@@ -111,6 +111,12 @@ func (c *Client) Close() {
 	c.transport.CloseIdleConnections()
 }
 
+// Brokers returns the broker addresses the client connects to, with any URL
+// scheme already normalized away.
+func (c *Client) Brokers() []string {
+	return append([]string(nil), c.brokers...)
+}
+
 // Ping checks connectivity to the Kafka cluster.
 func (c *Client) Ping(ctx context.Context) error {
 	conn, err := c.dial(ctx)
