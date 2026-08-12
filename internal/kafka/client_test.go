@@ -163,6 +163,73 @@ func TestNewClientWithOptionsSameBehaviorAsNewClient(t *testing.T) {
 	assert.Equal(t, a.dialer.Timeout, b.dialer.Timeout)
 }
 
+func TestNewClientWithOptionsSASLPlain(t *testing.T) {
+	t.Setenv("TEST_SASL_PW", "secret")
+	c, err := NewClientWithOptions([]string{"localhost:9092"}, Options{
+		SASL: SASLOptions{Mechanism: "plain", Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "PLAIN", c.dialer.SASLMechanism.Name())
+	require.NotNil(t, c.transport.SASL)
+}
+
+func TestNewClientWithOptionsSASLScram(t *testing.T) {
+	cases := []struct{ mech, want string }{
+		{"scram-sha-256", "SCRAM-SHA-256"},
+		{"scram-sha-512", "SCRAM-SHA-512"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mech, func(t *testing.T) {
+			t.Setenv("TEST_SASL_PW", "secret")
+			c, err := NewClientWithOptions([]string{"localhost:9092"}, Options{
+				SASL: SASLOptions{Mechanism: tc.mech, Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+			})
+			require.NoError(t, err)
+			defer c.Close()
+			require.NotNil(t, c.dialer.SASLMechanism)
+			assert.Equal(t, tc.want, c.dialer.SASLMechanism.Name())
+		})
+	}
+}
+
+func TestNewClientWithOptionsSASLComposesWithTLS(t *testing.T) {
+	dir := t.TempDir()
+	ca, cert, key := generateTestCert(t, dir)
+	t.Setenv("TEST_SASL_PW", "secret")
+	c, err := NewClientWithOptions([]string{"localhost:9093"}, Options{
+		TLS:  TLSOptions{Enabled: true, CAFile: ca, CertFile: cert, KeyFile: key},
+		SASL: SASLOptions{Mechanism: "scram-sha-512", Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.TLS)
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "SCRAM-SHA-512", c.dialer.SASLMechanism.Name())
+}
+
+func TestNewClientWithOptionsSASLErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		opts SASLOptions
+		want string
+	}{
+		{"unknown mechanism", SASLOptions{Mechanism: "kerberos", Username: "u", PasswordEnv: "PW"}, "sasl"},
+		{"plain no username", SASLOptions{Mechanism: "plain", PasswordEnv: "PW"}, "username"},
+		{"scram no username", SASLOptions{Mechanism: "scram-sha-256", PasswordEnv: "PW"}, "username"},
+		{"plain no password env", SASLOptions{Mechanism: "plain", Username: "u"}, "password_env"},
+		{"plain empty password env", SASLOptions{Mechanism: "plain", Username: "u", PasswordEnv: "MISSING_PW_VAR"}, "MISSING_PW_VAR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClientWithOptions([]string{"localhost:9092"}, Options{SASL: tc.opts})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 func TestListTopicsIntegration(t *testing.T) {
 	broker := os.Getenv("STREAMPULSE_TEST_BROKER")
 	if broker == "" {

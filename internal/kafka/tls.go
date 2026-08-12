@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+
+	"github.com/segmentio/kafka-go/sasl"
+	"github.com/segmentio/kafka-go/sasl/plain"
+	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
 // TLSOptions configures TLS and mutual TLS for broker connections. An empty
@@ -58,4 +62,62 @@ func buildTLSConfig(opts TLSOptions) (*tls.Config, error) {
 		slog.Warn("kafka: TLS InsecureSkipVerify is enabled; broker certificates will not be verified")
 	}
 	return cfg, nil
+}
+
+// SASLOptions configures SASL authentication for broker connections. An
+// empty Mechanism disables SASL. Password is resolved from the environment
+// variable named by PasswordEnv — it is never passed inline.
+type SASLOptions struct {
+	Mechanism   string // plain | scram-sha-256 | scram-sha-512 | aws-iam
+	Username    string
+	PasswordEnv string
+}
+
+// buildSASL constructs the sasl.Mechanism described by opts, or nil when SASL
+// is not configured. getenv resolves the password environment variable and is
+// injected for testability; callers pass os.Getenv. Error messages never
+// include credentials.
+func buildSASL(opts SASLOptions, getenv func(string) string) (sasl.Mechanism, error) {
+	switch opts.Mechanism {
+	case "":
+		return nil, nil
+	case "plain", "scram-sha-256", "scram-sha-512":
+		if opts.Username == "" {
+			return nil, fmt.Errorf("sasl %s: username is required", opts.Mechanism)
+		}
+		password, err := saslPassword(opts, getenv)
+		if err != nil {
+			return nil, err
+		}
+		switch opts.Mechanism {
+		case "plain":
+			return plain.Mechanism{Username: opts.Username, Password: password}, nil
+		case "scram-sha-256":
+			return scram.Mechanism(scram.SHA256, opts.Username, password)
+		default:
+			return scram.Mechanism(scram.SHA512, opts.Username, password)
+		}
+	case "aws-iam":
+		return buildAWSIAM(opts)
+	default:
+		return nil, fmt.Errorf("unknown sasl mechanism %q", opts.Mechanism)
+	}
+}
+
+// saslPassword resolves the password from the named environment variable,
+// erroring when it is unconfigured or unset.
+func saslPassword(opts SASLOptions, getenv func(string) string) (string, error) {
+	if opts.PasswordEnv == "" {
+		return "", fmt.Errorf("sasl %s: password_env is not configured", opts.Mechanism)
+	}
+	password := getenv(opts.PasswordEnv)
+	if password == "" {
+		return "", fmt.Errorf("sasl %s: environment variable %s is not set or empty", opts.Mechanism, opts.PasswordEnv)
+	}
+	return password, nil
+}
+
+// buildAWSIAM constructs the AWS MSK IAM mechanism (wired in a later phase).
+func buildAWSIAM(SASLOptions) (sasl.Mechanism, error) {
+	return nil, fmt.Errorf("sasl mechanism %q is not supported yet", "aws-iam")
 }

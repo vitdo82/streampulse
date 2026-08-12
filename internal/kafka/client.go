@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,8 @@ type Client struct {
 
 // Options configures broker connectivity.
 type Options struct {
-	TLS TLSOptions
+	TLS  TLSOptions
+	SASL SASLOptions
 }
 
 // NewClient creates a new Kafka client with plaintext connectivity.
@@ -53,13 +55,20 @@ func NewClientWithOptions(brokers []string, opts Options) (*Client, error) {
 		return nil, err
 	}
 
+	mech, err := buildSASL(opts.SASL, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+
 	dialer := &kafka.Dialer{
-		Timeout: 5 * time.Second,
-		TLS:     tlsCfg,
+		Timeout:       5 * time.Second,
+		TLS:           tlsCfg,
+		SASLMechanism: mech,
 	}
 	transport := &kafka.Transport{
 		Dial: dialer.DialFunc,
 		TLS:  tlsCfg,
+		SASL: mech,
 	}
 	return &Client{
 		brokers:     brokers,
