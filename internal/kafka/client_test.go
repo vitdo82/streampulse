@@ -2,9 +2,17 @@ package kafka
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -50,6 +58,189 @@ func TestIsInternalTopic(t *testing.T) {
 func TestNewClient(t *testing.T) {
 	c := NewClient([]string{"localhost:9092"})
 	assert.NotNil(t, c)
+}
+
+// generateTestCert writes a self-signed CA and a client certificate/key pair
+// (1h validity) into dir and returns their paths.
+func generateTestCert(t *testing.T, dir string) (caFile, certFile, keyFile string) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "streampulse-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	caFile = filepath.Join(dir, "ca.pem")
+	certFile = filepath.Join(dir, "cert.pem")
+	keyFile = filepath.Join(dir, "key.pem")
+	require.NoError(t, os.WriteFile(caFile, certPEM, 0o600))
+	require.NoError(t, os.WriteFile(certFile, certPEM, 0o600))
+	require.NoError(t, os.WriteFile(keyFile, keyPEM, 0o600))
+	return caFile, certFile, keyFile
+}
+
+func TestNewClientWithOptionsPlain(t *testing.T) {
+	c, err := NewClientWithOptions([]string{"localhost:9092"}, Options{})
+	require.NoError(t, err)
+	defer c.Close()
+	assert.Nil(t, c.dialer.TLS)
+}
+
+func TestNewClientWithOptionsTLSFiles(t *testing.T) {
+	dir := t.TempDir()
+	ca, cert, key := generateTestCert(t, dir)
+	opts := Options{TLS: TLSOptions{Enabled: true, CAFile: ca, CertFile: cert, KeyFile: key}}
+	c, err := NewClientWithOptions([]string{"localhost:9092"}, opts)
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.TLS)
+	assert.Len(t, c.dialer.TLS.Certificates, 1)
+}
+
+func TestNewClientWithOptionsBadCA(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "bad.pem")
+	require.NoError(t, os.WriteFile(bad, []byte("not a cert"), 0o644))
+	_, err := NewClientWithOptions([]string{"x:1"}, Options{TLS: TLSOptions{Enabled: true, CAFile: bad}})
+	require.Error(t, err)
+}
+
+func TestNewClientWithOptionsMTLSRequiresBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	ca, cert, _ := generateTestCert(t, dir)
+	_, err := NewClientWithOptions([]string{"x:1"}, Options{TLS: TLSOptions{Enabled: true, CAFile: ca, CertFile: cert}})
+	require.Error(t, err)
+}
+
+func TestNewClientWithOptionsScheme(t *testing.T) {
+	t.Run("ssl scheme forces TLS", func(t *testing.T) {
+		c, err := NewClientWithOptions([]string{"ssl://localhost:9093"}, Options{})
+		require.NoError(t, err)
+		defer c.Close()
+		require.NotNil(t, c.dialer.TLS)
+		assert.Equal(t, []string{"localhost:9093"}, c.brokers)
+	})
+	t.Run("sasl_ssl scheme forces TLS", func(t *testing.T) {
+		c, err := NewClientWithOptions([]string{"sasl_ssl://localhost:9093"}, Options{})
+		require.NoError(t, err)
+		defer c.Close()
+		require.NotNil(t, c.dialer.TLS)
+		assert.Equal(t, []string{"localhost:9093"}, c.brokers)
+	})
+	t.Run("plaintext scheme stays plain", func(t *testing.T) {
+		c, err := NewClientWithOptions([]string{"plaintext://localhost:9092"}, Options{})
+		require.NoError(t, err)
+		defer c.Close()
+		assert.Nil(t, c.dialer.TLS)
+		assert.Equal(t, []string{"localhost:9092"}, c.brokers)
+	})
+}
+
+func TestNewClientWithOptionsSameBehaviorAsNewClient(t *testing.T) {
+	a := NewClient([]string{"localhost:9092"})
+	defer a.Close()
+	b, err := NewClientWithOptions([]string{"localhost:9092"}, Options{})
+	require.NoError(t, err)
+	defer b.Close()
+	assert.Equal(t, a.brokers, b.brokers)
+	assert.Equal(t, a.dialer.Timeout, b.dialer.Timeout)
+}
+
+func TestNewClientWithOptionsSASLPlain(t *testing.T) {
+	t.Setenv("TEST_SASL_PW", "secret")
+	c, err := NewClientWithOptions([]string{"localhost:9092"}, Options{
+		SASL: SASLOptions{Mechanism: "plain", Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "PLAIN", c.dialer.SASLMechanism.Name())
+	require.NotNil(t, c.transport.SASL)
+}
+
+func TestNewClientWithOptionsSASLScram(t *testing.T) {
+	cases := []struct{ mech, want string }{
+		{"scram-sha-256", "SCRAM-SHA-256"},
+		{"scram-sha-512", "SCRAM-SHA-512"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mech, func(t *testing.T) {
+			t.Setenv("TEST_SASL_PW", "secret")
+			c, err := NewClientWithOptions([]string{"localhost:9092"}, Options{
+				SASL: SASLOptions{Mechanism: tc.mech, Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+			})
+			require.NoError(t, err)
+			defer c.Close()
+			require.NotNil(t, c.dialer.SASLMechanism)
+			assert.Equal(t, tc.want, c.dialer.SASLMechanism.Name())
+		})
+	}
+}
+
+func TestNewClientWithOptionsSASLComposesWithTLS(t *testing.T) {
+	dir := t.TempDir()
+	ca, cert, key := generateTestCert(t, dir)
+	t.Setenv("TEST_SASL_PW", "secret")
+	c, err := NewClientWithOptions([]string{"localhost:9093"}, Options{
+		TLS:  TLSOptions{Enabled: true, CAFile: ca, CertFile: cert, KeyFile: key},
+		SASL: SASLOptions{Mechanism: "scram-sha-512", Username: "alice", PasswordEnv: "TEST_SASL_PW"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.TLS)
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "SCRAM-SHA-512", c.dialer.SASLMechanism.Name())
+}
+
+func TestNewClientWithOptionsSASLErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		opts SASLOptions
+		want string
+	}{
+		{"unknown mechanism", SASLOptions{Mechanism: "kerberos", Username: "u", PasswordEnv: "PW"}, "sasl"},
+		{"plain no username", SASLOptions{Mechanism: "plain", PasswordEnv: "PW"}, "username"},
+		{"scram no username", SASLOptions{Mechanism: "scram-sha-256", PasswordEnv: "PW"}, "username"},
+		{"plain no password env", SASLOptions{Mechanism: "plain", Username: "u"}, "password_env"},
+		{"plain empty password env", SASLOptions{Mechanism: "plain", Username: "u", PasswordEnv: "MISSING_PW_VAR"}, "MISSING_PW_VAR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClientWithOptions([]string{"localhost:9092"}, Options{SASL: tc.opts})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestNewClientWithOptionsSASLAWSIAM(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	c, err := NewClientWithOptions([]string{"localhost:9098"}, Options{
+		SASL: SASLOptions{Mechanism: "aws-iam"},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	require.NotNil(t, c.dialer.SASLMechanism)
+	assert.Equal(t, "AWS_MSK_IAM", c.dialer.SASLMechanism.Name())
+	require.NotNil(t, c.transport.SASL)
 }
 
 func TestListTopicsIntegration(t *testing.T) {

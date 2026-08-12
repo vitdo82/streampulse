@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -23,16 +24,86 @@ type Client struct {
 	transport   *kafka.Transport
 }
 
-// NewClient creates a new Kafka client.
+// Options configures broker connectivity.
+type Options struct {
+	TLS  TLSOptions
+	SASL SASLOptions
+}
+
+// NewClient creates a new Kafka client with plaintext connectivity.
 func NewClient(brokers []string) *Client {
-	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
-	transport := &kafka.Transport{Dial: dialer.DialFunc}
+	c, err := NewClientWithOptions(brokers, Options{})
+	if err != nil {
+		// Default options never fail: no TLS files or SASL are configured.
+		panic(fmt.Sprintf("kafka: NewClient with default options: %v", err))
+	}
+	return c
+}
+
+// NewClientWithOptions creates a new Kafka client with optional TLS and SASL
+// authentication. Broker addresses may be bare host:port or carry a URL
+// scheme (ssl://, sasl_ssl:// force TLS; plaintext:// is the default).
+func NewClientWithOptions(brokers []string, opts Options) (*Client, error) {
+	brokers, secure := normalizeBrokers(brokers)
+
+	tlsOpts := opts.TLS
+	if secure {
+		tlsOpts.Enabled = true
+	}
+	tlsCfg, err := buildTLSConfig(tlsOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	mech, err := buildSASL(opts.SASL, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &kafka.Dialer{
+		Timeout:       5 * time.Second,
+		TLS:           tlsCfg,
+		SASLMechanism: mech,
+	}
+	transport := &kafka.Transport{
+		Dial: dialer.DialFunc,
+		TLS:  tlsCfg,
+		SASL: mech,
+	}
 	return &Client{
 		brokers:     brokers,
 		dialer:      dialer,
 		transport:   transport,
 		adminClient: &kafka.Client{Transport: transport},
+	}, nil
+}
+
+// normalizeBrokers strips an optional URL scheme from each broker address and
+// reports whether any broker requires TLS (ssl:// or sasl_ssl:// form).
+func normalizeBrokers(brokers []string) ([]string, bool) {
+	normalized := make([]string, len(brokers))
+	secure := false
+	for i, b := range brokers {
+		var s bool
+		normalized[i], s = normalizeBroker(b)
+		secure = secure || s
 	}
+	return normalized, secure
+}
+
+// normalizeBroker strips the scheme from a broker address and reports whether
+// the scheme implies TLS.
+func normalizeBroker(b string) (string, bool) {
+	if rest, ok := strings.CutPrefix(b, "sasl_ssl://"); ok {
+		return rest, true
+	}
+	if rest, ok := strings.CutPrefix(b, "ssl://"); ok {
+		return rest, true
+	}
+	if rest, ok := strings.CutPrefix(b, "plaintext://"); ok {
+		return rest, false
+	}
+	return b, false
 }
 
 // Close releases the transport's connection pool and background goroutines.
