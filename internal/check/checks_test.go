@@ -306,6 +306,57 @@ func TestRetentionCheckConfigError(t *testing.T) {
 	assert.Contains(t, results[2].Message, "describe configs")
 }
 
+func TestAllGroupLagCheckPass(t *testing.T) {
+	env := Env{
+		Client: &fakeClient{
+			groups: []kafka.GroupInfo{
+				{Name: "g1", State: "Stable", Members: 1},
+				{Name: "g2", State: "Stable", Members: 2},
+			},
+			lag: map[string]map[string]int64{"g1": {"orders": 50}, "g2": {"payments": 900}},
+		},
+		Flags: Flags{MaxLag: 1000},
+	}
+	results := RunAll(context.Background(), env)
+
+	require.Len(t, results, 2)
+	assert.Equal(t, "group lag", results[1].Name)
+	assert.Equal(t, StatusPass, results[1].Status)
+	assert.Contains(t, results[1].Message, "max lag 900")
+	assert.Equal(t, 0, Verdict(results))
+}
+
+func TestAllGroupLagCheckFailsOnAnyGroup(t *testing.T) {
+	env := Env{
+		Client: &fakeClient{
+			groups: []kafka.GroupInfo{
+				{Name: "g1", State: "Stable", Members: 1},
+				{Name: "g2", State: "Stable", Members: 2},
+			},
+			lag: map[string]map[string]int64{"g1": {"orders": 2400}, "g2": {"payments": 5}},
+		},
+		Flags: Flags{MaxLag: 1000},
+	}
+	results := RunAll(context.Background(), env)
+
+	require.Len(t, results, 2)
+	assert.Equal(t, "group lag", results[1].Name)
+	assert.Equal(t, StatusFail, results[1].Status)
+	assert.Contains(t, results[1].Message, "g1 lag 2400, max 1000")
+	assert.Equal(t, 1, Verdict(results))
+}
+
+func TestAllGroupLagCheckNoGroups(t *testing.T) {
+	env := Env{
+		Client: &fakeClient{groups: nil, lag: map[string]map[string]int64{}},
+		Flags:  Flags{MaxLag: 1000},
+	}
+	results := RunAll(context.Background(), env)
+
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusPass, results[1].Status)
+}
+
 func TestReplicationCheckPass(t *testing.T) {
 	env := Env{
 		Client: &fakeClient{cluster: &kafka.ClusterInfo{

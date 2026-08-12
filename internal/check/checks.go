@@ -95,6 +95,11 @@ func RunAll(ctx context.Context, env Env) []Result {
 	for _, group := range env.Flags.Groups {
 		checks = append(checks, checkGroup(group))
 	}
+	if env.Flags.MaxLag > 0 && len(env.Flags.Groups) == 0 {
+		// With no explicit --group, the lag gate applies to every consumer
+		// group in the cluster.
+		checks = append(checks, checkAllGroupLag())
+	}
 	if env.Flags.MinRetentionHours > 0 {
 		for _, topic := range env.Flags.Topics {
 			checks = append(checks, checkRetention(topic, env.Flags.MinRetentionHours))
@@ -236,6 +241,46 @@ func checkGroup(group string) Check {
 				return Result{Status: StatusFail, Message: strings.Join(problems, "; "), Value: float64(total)}, nil
 			}
 			return Result{Status: StatusPass, Message: fmt.Sprintf("state Stable, lag %d", total), Value: float64(total)}, nil
+		},
+	}
+}
+
+// checkAllGroupLag builds a check that every consumer group in the cluster
+// stays within the configured lag maximum.
+func checkAllGroupLag() Check {
+	return Check{
+		Name: "group lag",
+		Run: func(ctx context.Context, env Env) (Result, error) {
+			groups, err := env.Client.ListConsumerGroups(ctx)
+			if err != nil {
+				return Result{}, fmt.Errorf("list consumer groups: %w", err)
+			}
+			lag, err := env.Client.GroupLag(ctx)
+			if err != nil {
+				return Result{}, fmt.Errorf("group lag: %w", err)
+			}
+			maxLag := env.Flags.MaxLag
+			if maxLag < 1 {
+				maxLag = DefaultMaxLag
+			}
+			var problems []string
+			var worst int64
+			for _, g := range groups {
+				var total int64
+				for _, l := range lag[g.Name] {
+					total += l
+				}
+				if total > worst {
+					worst = total
+				}
+				if total > maxLag {
+					problems = append(problems, fmt.Sprintf("%s lag %d, max %d", g.Name, total, maxLag))
+				}
+			}
+			if len(problems) > 0 {
+				return Result{Status: StatusFail, Message: strings.Join(problems, "; "), Value: float64(worst)}, nil
+			}
+			return Result{Status: StatusPass, Message: fmt.Sprintf("max lag %d", worst), Value: float64(worst)}, nil
 		},
 	}
 }
