@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/pulsedev/streampulse/internal/config"
+	"github.com/pulsedev/streampulse/internal/daemon"
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/pulsedev/streampulse/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -25,8 +31,40 @@ func newServeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_ = cfg // TODO: start daemon (Phase 4)
-			return nil
+
+			store, err := storage.NewStore(cfg.Storage.Type, cfg.Storage.SQLite.Path)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			client, err := kafka.NewClientWithOptions(cfg.Brokers, kafka.Options{
+				TLS: kafka.TLSOptions{
+					Enabled:            cfg.Kafka.TLS.Enabled,
+					CAFile:             cfg.Kafka.TLS.CAFile,
+					CertFile:           cfg.Kafka.TLS.CertFile,
+					KeyFile:            cfg.Kafka.TLS.KeyFile,
+					InsecureSkipVerify: cfg.Kafka.TLS.InsecureSkipVerify,
+				},
+				SASL: kafka.SASLOptions{
+					Mechanism:   cfg.Kafka.SASL.Mechanism,
+					Username:    cfg.Kafka.SASL.Username,
+					PasswordEnv: cfg.Kafka.SASL.PasswordEnv,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			d := daemon.NewWithOptions(cfg, store, client, daemon.Options{Version: cmd.Root().Version})
+
+			// SIGTERM/SIGINT cancel the daemon context; a second signal
+			// takes the immediate-exit path (signal.NotifyContext stops
+			// catching, so the default handler kills the process).
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return d.Run(ctx)
 		},
 	}
 }
