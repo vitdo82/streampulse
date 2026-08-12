@@ -131,9 +131,3 @@ func (c *Config) ParseScrapeInterval() (time.Duration, error) {
 	}
 	return d, nil
 }
-
-// Validate returns cfg when valid and a joined error listing all violations
-// otherwise. Placeholder for Task 0B.
-func Validate(cfg *Config) (*Config, error) {
-	return cfg, nil
-}
