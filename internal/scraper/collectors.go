@@ -181,3 +181,11 @@ func groupStateValue(state string) float64 {
 		return -1
 	}
 }
+
+// dlqCollector is a placeholder for Phase 6 DLQ discovery; it is not part of
+// the default collector set until then.
+type dlqCollector struct{}
+
+func (dlqCollector) Collect(context.Context, time.Time) ([]storage.Metric, error) {
+	return nil, nil
+}

@@ -398,3 +398,50 @@ func TestGroupCollectorError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cluster down")
 }
+
+func TestNewDefaultCollectors(t *testing.T) {
+	s := New(testClusterID, &fakeClient{}, &fakeStore{}, 0)
+	require.Len(t, s.collectors, 3)
+	assert.IsType(t, &brokerCollector{}, s.collectors[0])
+	assert.IsType(t, &topicCollector{}, s.collectors[1])
+	assert.IsType(t, &groupCollector{}, s.collectors[2])
+}
+
+func TestScrapeAndStoreBatch(t *testing.T) {
+	store := &fakeStore{}
+	ok := &fakeCollector{metrics: []storage.Metric{{Metric: "a", Value: 1}, {Metric: "b", Value: 2}}}
+	fail := &fakeCollector{err: errors.New("boom")}
+	s := NewWithCollectors(testClusterID, store, []Collector{ok, fail, ok})
+
+	err := s.ScrapeAndStore(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "boom")
+
+	// One batch per cycle; the failing collector's metrics are dropped but the
+	// others are persisted, stamped with the cluster ID.
+	require.Len(t, store.batches, 1)
+	require.Len(t, store.batches[0], 4)
+	for _, m := range store.batches[0] {
+		assert.Equal(t, testClusterID, m.ClusterID)
+	}
+}
+
+func TestScrapeAndStoreEmptyNoWrite(t *testing.T) {
+	store := &fakeStore{}
+	fail := &fakeCollector{err: errors.New("boom")}
+	s := NewWithCollectors(testClusterID, store, []Collector{fail})
+
+	err := s.ScrapeAndStore(context.Background())
+	require.Error(t, err)
+	assert.Empty(t, store.batches)
+}
+
+func TestScrapeAndStoreWriteError(t *testing.T) {
+	store := &fakeStore{err: errors.New("disk full")}
+	s := NewWithCollectors(testClusterID, store, []Collector{&fakeCollector{metrics: []storage.Metric{{Metric: "a", Value: 1}}}})
+
+	err := s.ScrapeAndStore(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "write batch")
+	assert.Contains(t, err.Error(), "disk full")
+}
