@@ -96,6 +96,14 @@ func (f *fakeStore) Migrate(ctx context.Context) error {
 	return nil
 }
 
+func (f *fakeStore) QueryAlertState(ctx context.Context) ([]storage.AlertStateRow, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) SaveAlertState(ctx context.Context, row storage.AlertStateRow) error {
+	return nil
+}
+
 func (f *fakeStore) Close() error {
 	return nil
 }
