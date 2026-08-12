@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -59,6 +60,7 @@ type PromOptions struct {
 // PromServer serves the daemon's metrics over HTTP.
 type PromServer struct {
 	server   *http.Server
+	mu       sync.Mutex
 	listener net.Listener
 }
 
@@ -94,7 +96,9 @@ func (s *PromServer) Start() error {
 	if err != nil {
 		return fmt.Errorf("prometheus listen %s: %w", s.server.Addr, err)
 	}
+	s.mu.Lock()
 	s.listener = ln
+	s.mu.Unlock()
 	go func() {
 		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("prometheus server", "err", err)
@@ -103,8 +107,11 @@ func (s *PromServer) Start() error {
 	return nil
 }
 
-// Addr returns the bound listener address (useful when listening on :0).
+// Addr returns the bound listener address (useful when listening on :0),
+// or nil before Start.
 func (s *PromServer) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.listener == nil {
 		return nil
 	}

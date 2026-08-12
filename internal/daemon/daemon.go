@@ -26,18 +26,25 @@ type Scraper interface {
 	ScrapeAndStore(ctx context.Context) error
 }
 
+// Client is the subset of the kafka client the daemon uses directly: it
+// verifies broker connectivity before each scrape cycle.
+type Client interface {
+	Ping(ctx context.Context) error
+}
+
 // Daemon hosts the scrape and rollup loops and the Prometheus endpoint.
 // Run blocks until the context is canceled or Shutdown is called.
 type Daemon struct {
 	cfg     *config.Config
 	store   storage.MetricsStore
-	client  *kafka.Client
+	client  Client
 	scraper Scraper
 
 	stats *ScrapeStats
 	prom  *PromServer
 
-	scraping atomic.Bool // in-flight guard for the scrape loop
+	scraping  atomic.Bool // in-flight guard for the scrape loop
+	backoffFn func(int) time.Duration
 
 	mu      sync.Mutex // guards cancel
 	cancel  context.CancelFunc
@@ -64,13 +71,14 @@ func NewWithOptions(cfg *config.Config, store storage.MetricsStore, client *kafk
 	interval, _ := cfg.ParseScrapeInterval()
 	stats := NewScrapeStats()
 	return &Daemon{
-		cfg:     cfg,
-		store:   store,
-		client:  client,
-		scraper: scraper.New(cfg.ClusterID, client, store, interval),
-		stats:   stats,
-		prom:    NewPromServer(&cfg.Prometheus, stats, PromOptions{Version: opts.Version}),
-		stopped: make(chan struct{}),
+		cfg:       cfg,
+		store:     store,
+		client:    client,
+		scraper:   scraper.New(cfg.ClusterID, client, store, interval),
+		stats:     stats,
+		prom:      NewPromServer(&cfg.Prometheus, stats, PromOptions{Version: opts.Version}),
+		backoffFn: exponentialBackoff,
+		stopped:   make(chan struct{}),
 	}
 }
 

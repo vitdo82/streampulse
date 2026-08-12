@@ -72,7 +72,12 @@ func (f *fakeStore) rollupCount() int {
 
 func TestScrapeLoopTicksAtInterval(t *testing.T) {
 	scraper := &fakeScraper{}
-	d := &Daemon{scraper: scraper, stopped: make(chan struct{})}
+	d := &Daemon{
+		client:    &fakePinger{},
+		scraper:   scraper,
+		backoffFn: func(int) time.Duration { return time.Millisecond },
+		stopped:   make(chan struct{}),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -92,7 +97,12 @@ func TestScrapeLoopTicksAtInterval(t *testing.T) {
 
 func TestScrapeLoopSkipsOverlappingTick(t *testing.T) {
 	scraper := &fakeScraper{gate: make(chan struct{})}
-	d := &Daemon{scraper: scraper, stopped: make(chan struct{})}
+	d := &Daemon{
+		client:    &fakePinger{},
+		scraper:   scraper,
+		backoffFn: func(int) time.Duration { return time.Millisecond },
+		stopped:   make(chan struct{}),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

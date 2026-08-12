@@ -32,8 +32,44 @@ func (d *Daemon) scrapeOnce(ctx context.Context) {
 	}
 	go func() {
 		defer d.scraping.Store(false)
+		if err := d.ensureConnected(ctx); err != nil {
+			return // context canceled while waiting for the broker
+		}
 		d.doScrape(ctx)
 	}()
+}
+
+// ensureConnected verifies broker connectivity, retrying with exponential
+// backoff until it succeeds or the context is canceled (daemon.md failure
+// modes: Kafka down at startup). The attempt counter restarts at zero on
+// every scrape cycle, so a recovered broker is picked up immediately.
+func (d *Daemon) ensureConnected(ctx context.Context) error {
+	if d.client.Ping(ctx) == nil {
+		return nil
+	}
+	for attempt := 0; ; attempt++ {
+		delay := d.backoffFn(attempt)
+		slog.Warn("kafka unreachable, retrying", "retry_in", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if d.client.Ping(ctx) == nil {
+			return nil
+		}
+	}
+}
+
+// exponentialBackoff returns the nth retry delay: 1s, 2s, 4s, ... capped at
+// 30s.
+func exponentialBackoff(n int) time.Duration {
+	if n >= 5 {
+		return 30 * time.Second
+	}
+	return time.Second << n
 }
 
 // doScrape performs one scrape cycle and records its outcome in the
