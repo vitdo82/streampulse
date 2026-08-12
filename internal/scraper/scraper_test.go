@@ -139,7 +139,7 @@ func TestBrokerCollector(t *testing.T) {
 
 	metrics, err := c.Collect(context.Background(), now)
 	require.NoError(t, err)
-	require.Len(t, metrics, 5)
+	require.Len(t, metrics, 6)
 
 	// One cluster-level metric: the under-replicated partition count.
 	under, ok := metricWithEntityType(metrics, MetricClusterUnderReplicatedPartitions, "cluster")
@@ -165,6 +165,45 @@ func TestBrokerCollector(t *testing.T) {
 	assert.Equal(t, 3.0, got["broker-2:9093"][MetricBrokerReplicaPartitions])
 }
 
+func TestPartitionSkew(t *testing.T) {
+	cases := []struct {
+		name    string
+		leaders []int
+		want    float64
+	}{
+		{"three brokers skewed", []int{5, 2, 2}, 5.0 / 3.0},
+		{"balanced", []int{3, 3, 3}, 1.0},
+		{"single broker", []int{7}, 0},
+		{"no brokers", nil, 0},
+		{"zero leaders", []int{0, 0, 0}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.InDelta(t, tc.want, partitionSkew(tc.leaders), 0.001)
+		})
+	}
+}
+
+func TestBrokerCollectorPartitionSkew(t *testing.T) {
+	now := time.Now()
+	client := &fakeClient{cluster: &kafka.ClusterInfo{
+		ControllerID: 1,
+		Brokers: []kafka.BrokerInfo{
+			{Host: "broker-1", Port: 9092, ID: 1, LeaderPartitions: 5},
+			{Host: "broker-2", Port: 9093, ID: 2, LeaderPartitions: 2},
+			{Host: "broker-3", Port: 9094, ID: 3, LeaderPartitions: 2},
+		},
+	}}
+	c := newBrokerCollector(client, testClusterID)
+
+	metrics, err := c.Collect(context.Background(), now)
+	require.NoError(t, err)
+	skew, ok := metricWithEntityType(metrics, MetricClusterPartitionSkew, "cluster")
+	require.True(t, ok)
+	assert.Equal(t, "cluster", skew.EntityName)
+	assert.InDelta(t, 5.0/3.0, skew.Value, 0.001)
+}
+
 func TestBrokerCollectorNoUnderReplicated(t *testing.T) {
 	client := &fakeClient{cluster: &kafka.ClusterInfo{
 		ControllerID: 1,
@@ -185,7 +224,7 @@ func TestBrokerCollectorOfflineBrokerName(t *testing.T) {
 
 	metrics, err := c.Collect(context.Background(), time.Now())
 	require.NoError(t, err)
-	require.Len(t, metrics, 3)
+	require.Len(t, metrics, 4)
 	assert.Equal(t, "3", metrics[0].EntityName)
 }
 

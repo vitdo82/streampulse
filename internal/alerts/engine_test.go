@@ -181,6 +181,36 @@ func TestEngineUnderReplicated(t *testing.T) {
 	assert.Equal(t, "ok", s.Status)
 }
 
+func TestEnginePartitionSkew(t *testing.T) {
+	rule := Rule{
+		Name: "partition-skew", Severity: "warning",
+		Condition: mustCondition("skew > 1.5"), EntityType: "cluster",
+		For: 2 * time.Minute, RepeatInterval: time.Hour,
+	}
+	store := newMemStore(t)
+	eng := New([]Rule{rule}, store)
+	ctx := context.Background()
+	now := testTime()
+
+	skewed := []storage.Metric{
+		{EntityType: "cluster", EntityName: "cluster", Metric: "kafka.cluster.partition_skew", Value: 1.667},
+	}
+	require.NoError(t, eng.Evaluate(ctx, skewed, now))
+	s, _ := eng.State("partition-skew")
+	assert.Equal(t, "pending", s.Status)
+
+	require.NoError(t, eng.Evaluate(ctx, skewed, now.Add(2*time.Minute)))
+	s, _ = eng.State("partition-skew")
+	assert.Equal(t, "firing", s.Status)
+
+	balanced := []storage.Metric{
+		{EntityType: "cluster", EntityName: "cluster", Metric: "kafka.cluster.partition_skew", Value: 1.0},
+	}
+	require.NoError(t, eng.Evaluate(ctx, balanced, now.Add(3*time.Minute)))
+	s, _ = eng.State("partition-skew")
+	assert.Equal(t, "ok", s.Status)
+}
+
 func TestMergeRulesUnknownName(t *testing.T) {
 	_, err := MergeRules(BuiltinRules(), []config.AlertRule{{Name: "nope"}})
 	require.Error(t, err)

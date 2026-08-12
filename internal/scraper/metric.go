@@ -10,6 +10,9 @@ const (
 	// MetricClusterUnderReplicatedPartitions counts partitions whose ISR is
 	// smaller than the replica set.
 	MetricClusterUnderReplicatedPartitions = "kafka.cluster.under_replicated_partitions"
+	// MetricClusterPartitionSkew is the ratio of the most-led broker to the
+	// average leader count (0 with 0 or 1 brokers).
+	MetricClusterPartitionSkew = "kafka.cluster.partition_skew"
 
 	// MetricTopicPartitionCount is the number of partitions of a topic.
 	MetricTopicPartitionCount = "kafka.topic.partition_count"

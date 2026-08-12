@@ -27,15 +27,44 @@ func (b *brokerCollector) Collect(ctx context.Context, now time.Time) ([]storage
 	if err != nil {
 		return nil, fmt.Errorf("describe cluster: %w", err)
 	}
-	metrics := make([]storage.Metric, 0, len(info.Brokers)*2+1)
+	metrics := make([]storage.Metric, 0, len(info.Brokers)*2+2)
 	for _, br := range info.Brokers {
 		metrics = append(metrics,
 			storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricBrokerLeaderPartitions, EntityType: "broker", EntityName: brokerName(br), Value: float64(br.LeaderPartitions)},
 			storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricBrokerReplicaPartitions, EntityType: "broker", EntityName: brokerName(br), Value: float64(br.ReplicaPartitions)},
 		)
 	}
-	metrics = append(metrics, storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricClusterUnderReplicatedPartitions, EntityType: "cluster", EntityName: "cluster", Value: float64(info.UnderReplicatedPartitions)})
+	leaders := make([]int, len(info.Brokers))
+	for i, br := range info.Brokers {
+		leaders[i] = br.LeaderPartitions
+	}
+	metrics = append(metrics,
+		storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricClusterUnderReplicatedPartitions, EntityType: "cluster", EntityName: "cluster", Value: float64(info.UnderReplicatedPartitions)},
+		storage.Metric{TS: now, ClusterID: b.clusterID, Metric: MetricClusterPartitionSkew, EntityType: "cluster", EntityName: "cluster", Value: partitionSkew(leaders)},
+	)
 	return metrics, nil
+}
+
+// partitionSkew is the ratio of the most-led broker to the average leader
+// count: 1 is a perfectly balanced cluster, >1 means leadership is
+// concentrated. It is 0 when there is no meaningful distribution (fewer than
+// two brokers, or no partitions led at all).
+func partitionSkew(leaders []int) float64 {
+	if len(leaders) <= 1 {
+		return 0
+	}
+	max := 0
+	sum := 0
+	for _, n := range leaders {
+		if n > max {
+			max = n
+		}
+		sum += n
+	}
+	if sum == 0 {
+		return 0
+	}
+	return float64(max) / (float64(sum) / float64(len(leaders)))
 }
 
 // brokerName formats a broker as host:port, falling back to the broker ID when
