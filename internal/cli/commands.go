@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pulsedev/streampulse/internal/analytics"
+	"github.com/pulsedev/streampulse/internal/check"
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/daemon"
 	"github.com/pulsedev/streampulse/internal/dlq"
@@ -101,19 +103,120 @@ func newServeCommand() *cobra.Command {
 	}
 }
 
+// checkResultView is the JSON shape of one check result.
+type checkResultView struct {
+	Name    string  `json:"name"`
+	Status  string  `json:"status"`
+	Message string  `json:"message"`
+	Value   float64 `json:"value,omitempty"`
+}
+
+// newCheckResults runs the health checks for cfg and returns the results and
+// the process verdict (0 pass, 1 failed check, 2 connectivity/usage). The
+// command wrapper maps the verdict to os.Exit; tests call this directly.
+func newCheckResults(ctx context.Context, cfg *config.Config, flags check.Flags) ([]check.Result, int, error) {
+	client, err := newKafkaClient(cfg)
+	if err != nil {
+		return nil, 2, err
+	}
+	defer client.Close()
+
+	results := check.RunAll(ctx, check.Env{Client: client, Flags: flags})
+	return results, check.Verdict(results), nil
+}
+
+// printCheckResults renders one line per check plus the verdict line.
+func printCheckResults(w io.Writer, results []check.Result) {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	for _, r := range results {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Name, r.Status, r.Message)
+	}
+	tw.Flush()
+}
+
+// verdictLabel maps the numeric exit code to its human label.
+func verdictLabel(verdict int) string {
+	switch verdict {
+	case 1:
+		return "FAIL"
+	case 2:
+		return "ERROR"
+	default:
+		return "PASS"
+	}
+}
+
+// printCheckJSON renders the results plus the verdict as JSON.
+func printCheckJSON(w io.Writer, results []check.Result, verdict int) error {
+	views := make([]checkResultView, len(results))
+	for i, r := range results {
+		views[i] = checkResultView{Name: r.Name, Status: string(r.Status), Message: r.Message, Value: r.Value}
+	}
+	return json.NewEncoder(w).Encode(struct {
+		Results  []checkResultView `json:"results"`
+		Verdict  int               `json:"verdict"`
+		ExitCode int               `json:"exit_code"`
+	}{Results: views, Verdict: verdict, ExitCode: verdict})
+}
+
 func newCheckCommand() *cobra.Command {
-	return &cobra.Command{
+	var (
+		topics            []string
+		groups            []string
+		minPartitions     int
+		maxLag            int64
+		minRetentionHours float64
+		checkReplication  bool
+		timeout           time.Duration
+		jsonOut           bool
+	)
+	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "One-shot health check for CI/CD pipelines",
+		Long: `One-shot health check for CI/CD pipelines.
+
+Exit codes:
+  0  all checks passed
+  1  a check failed (threshold exceeded, resource unhealthy)
+  2  usage, config, or connectivity error (pipeline problem)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := CfgFromContext(cmd.Context())
 			if err != nil {
 				return err
 			}
-			_ = cfg // TODO: run health check (Phase 8)
+			results, verdict, err := newCheckResults(cmd.Context(), cfg, check.Flags{
+				Topics:            topics,
+				Groups:            groups,
+				MinPartitions:     minPartitions,
+				MaxLag:            maxLag,
+				MinRetentionHours: minRetentionHours,
+				CheckReplication:  checkReplication,
+				Timeout:           timeout,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				if err := printCheckJSON(cmd.OutOrStdout(), results, verdict); err != nil {
+					return err
+				}
+			} else {
+				printCheckResults(cmd.OutOrStdout(), results)
+				fmt.Fprintf(cmd.OutOrStdout(), "verdict: %s (exit %d)\n", verdictLabel(verdict), verdict)
+			}
+			os.Exit(verdict)
 			return nil
 		},
 	}
+	cmd.Flags().StringArrayVar(&topics, "topic", nil, "Topic to check for existence and partition health (repeatable)")
+	cmd.Flags().StringArrayVar(&groups, "group", nil, "Consumer group to check for state and lag (repeatable)")
+	cmd.Flags().IntVar(&minPartitions, "min-partitions", check.DefaultMinPartitions, "Minimum partitions per topic")
+	cmd.Flags().Int64Var(&maxLag, "max-lag", check.DefaultMaxLag, "Maximum total consumer lag per group")
+	cmd.Flags().Float64Var(&minRetentionHours, "min-retention-hours", 0, "Minimum topic retention in hours (checked per topic)")
+	cmd.Flags().BoolVar(&checkReplication, "check-replication", false, "Fail when any broker replicates more partitions than it leads")
+	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Overall deadline for the check run")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output results and verdict as JSON")
+	return cmd
 }
 
 func newDLQCommand() *cobra.Command {
