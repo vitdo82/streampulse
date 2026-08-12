@@ -66,3 +66,7 @@ func TestSQLiteStorePurge(t *testing.T) {
 	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
 	assert.Equal(t, 1, count)
 }
+
+func TestValidTypes(t *testing.T) {
+	assert.Equal(t, []string{"sqlite", "postgres", "clickhouse"}, ValidTypes())
+}

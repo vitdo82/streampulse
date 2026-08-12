@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+
+	"github.com/pulsedev/streampulse/internal/storage"
 )
 
 // Validate checks structural config rules and returns cfg when valid, or a
@@ -20,11 +23,8 @@ func Validate(cfg *Config) (*Config, error) {
 		errs = append(errs, err)
 	}
 
-	switch cfg.Storage.Type {
-	case "sqlite", "postgres", "clickhouse", "":
-	default:
-		// TODO(wave2): use storage.ValidTypes() — helper lands in the
-		// storage phase; text must match storage.NewStore's error format.
+	if cfg.Storage.Type != "" && !slices.Contains(storage.ValidTypes(), cfg.Storage.Type) {
+		// Text matches storage.NewStore's error format.
 		errs = append(errs, fmt.Errorf("unknown storage type %q", cfg.Storage.Type))
 	}
 

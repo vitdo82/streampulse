@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,4 +36,13 @@ func TestRedacted(t *testing.T) {
 	cfg.Kafka.SASL.PasswordEnv = "PW"
 	r := cfg.Redacted()
 	assert.NotContains(t, fmt.Sprint(r), "PW")
+}
+
+func TestValidateAcceptsValidStorageTypes(t *testing.T) {
+	for _, typ := range storage.ValidTypes() {
+		cfg := DefaultConfig()
+		cfg.Storage.Type = typ
+		_, err := Validate(cfg)
+		assert.NoError(t, err, "storage type %q must validate", typ)
+	}
 }
