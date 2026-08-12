@@ -116,18 +116,20 @@ streampulse serve --brokers localhost:9093   # Connect StreamPulse
 ## Roadmap (What to Build Next)
 
 ```
-v0.1 (Weeks 1-3):  TUI + daemon + 6 alerts + DLQ module + Analytics L1
+v0.1 (DONE):  TUI + daemon + 6 alerts + DLQ module + Analytics L1 + config + auth
 v0.2 (Weeks 4-6):  REST API + local web dashboard + PostgreSQL + Analytics L2
 v0.3 (Weeks 7-10): Kafka Connect + Streaming (Flink/Streams) + PulseDev Cloud
 ```
 
-### v0.1 Priorities (in order)
-1. Scraper engine: connect to Kafka, poll broker/topic/consumer metrics every 5s
-2. Daemon mode: SQLite persistence, rollup goroutine, Prometheus /metrics
-3. TUI dashboard: connect to daemon, real-time tables, tab navigation
-4. Alert engine: 6 alert rules with state machine, Slack/Email/PagerDuty
-5. DLQ module: auto-discovery, inspection, replay with filters, dry run
-6. Analytics L1: growth charts, partition skew, retention analysis
+### v0.1 (implemented — see docs/design/ and docs/2026-08-10-v0.1-roadmap-plan.md)
+1. ✅ Scraper engine: poll broker/topic/consumer metrics every 5s (`internal/scraper`)
+2. ✅ Daemon mode: SQLite persistence, rollup, Prometheus /metrics (`internal/daemon`)
+3. ✅ TUI dashboard: 6 tabs, search, table nav, activity log, alert/DLQ/analytics data
+4. ✅ Alert engine: 6 rules, state machine, Slack/Email/PagerDuty (`internal/alerts`)
+5. ✅ DLQ module: discovery, inspection, replay with filters, dry run (`internal/dlq`)
+6. ✅ Analytics L1: growth charts, partition skew, retention analysis (`internal/analytics`)
+7. ✅ Config: viper defaults/file/env/flags (`internal/config`) + Kafka TLS/SASL/IAM auth
+8. ✅ CI gate: `check` command, exit codes 0/1/2 (`internal/check`)
 
 ## Dependencies (v0.1)
 

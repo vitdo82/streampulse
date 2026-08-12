@@ -1,62 +1,61 @@
 # StreamPulse — The k9s for Apache Kafka
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-**Single binary. Zero dependencies. `brew install streampulse`.**
+**Single binary. Zero CGo. `brew install streampulse`.**
 
-Real-time Kafka observability in your terminal. Consumer lag, broker health, DLQ management, analytics, and 7 production alerts — all in a k9s-style TUI. Optional PulseDev Cloud for hosted dashboards and team features.
-
-```
-$ brew install streampulse
-$ streampulse serve --brokers kafka:9092
-$ streampulse
-```
+Real-time Kafka observability in your terminal: consumer lag, broker health, DLQ management, analytics, and a production alert engine — all in a k9s-style TUI backed by a 24/7 daemon.
 
 ## Quick Start
 
 ```bash
-# Install
-brew install pulsedev/tap/streampulse
+# Build
+make build                       # → bin/streampulse
 
-# Or: go install
-go install github.com/pulsedev/streampulse/cmd/streampulse@latest
+# Start the daemon (scrape every 5s, SQLite persistence, Prometheus :9090)
+bin/streampulse serve --brokers localhost:9093
 
-# Start daemon (metrics collection + alerts 24/7)
-streampulse serve --brokers localhost:9092
+# Open the TUI (another terminal) — connects to Kafka directly
+bin/streampulse                  # default brokers: localhost:9093
 
-# Open TUI (in another terminal)
-streampulse
-
-# One-shot health check (CI/CD)
-streampulse check --topic orders --expect-max-lag 500
+# CI/CD health gate (exit 0 healthy / 1 failed / 2 error)
+bin/streampulse check --topic orders --group orders-processor --max-lag 1000 --json
 
 # DLQ management
-streampulse dlq list
-streampulse dlq inspect --topic orders.dlq
-streampulse dlq replay --topic orders.dlq --dry-run
+bin/streampulse dlq list
+bin/streampulse dlq inspect --topic payments.dlq --limit 10
+bin/streampulse dlq replay --topic payments.dlq --dry-run
+
+# Alerts & analytics
+bin/streampulse alerts --json
+bin/streampulse analyze --topics orders,payments --window 24h
 ```
+
+Local dev Kafka: `docker compose up -d` (KRaft Kafka 3.9 + producer/consumer).
 
 ## Features
 
-### v0.1 (Current)
+### Implemented (v0.1)
 
 | Feature | Description |
 |---------|-------------|
-| 🖥️ **TUI Dashboard** | k9s-style terminal dashboard — brokers, topics, consumer groups, real-time metrics |
-| 🔔 **7 Production Alerts** | Lag velocity, stale consumers, under-replicated partitions, dead topics, DLQ growing, anomaly detection |
-| 📂 **DLQ Management** | Auto-discover DLQ topics, inspect messages, cluster errors, replay with filters, dry run, archive, drain |
-| 📈 **Analytics** | Topic growth charts, partition skew detection, rebalance history, throughput patterns |
-| 📊 **Prometheus /metrics** | Native Prometheus endpoint on `:9090/metrics` |
-| ✅ **CI/CD Health Gate** | `streampulse check` exits 0/1 — pipe into any deployment pipeline |
+| 🖥️ **TUI Dashboard** | 6 tabs — Overview, Topics, Consumers, Alerts, DLQ, Analytics. Auto-refresh 2s, `/` search, table navigation, activity log |
+| ⚙️ **Daemon** | `serve` — scraper loop (5s), hourly/daily rollup, per-resolution retention purge, graceful shutdown, startup backoff |
+| 📊 **Prometheus /metrics** | `:9090/metrics` — scrape stats, alert state, build info |
+| 🔔 **Alert Engine** | 6 rules (broker down, under-replication, consumer lag, DLQ growth, partition skew, scrape failing) with ok→pending→firing state machine + Slack/Email/PagerDuty |
+| 📂 **DLQ Module** | Convention-based discovery (`.dlq/.dead/.error/.failed`), inspect, replay with dry-run, filters, skip-existing |
+| 📈 **Analytics L1** | Topic growth sparklines, partition skew, retention analysis (CLI + TUI) |
+| ✅ **CI/CD Health Gate** | `check` — connectivity, topics, group lag, retention, replication; exits 0/1/2 |
+| 🔐 **Kafka Auth** | TLS/mTLS, SASL PLAIN/SCRAM, AWS MSK IAM (SigV4, stdlib-only) |
+| 💾 **Storage** | SQLite (WAL), raw(5s,24h)→hourly(90d)→daily(365d), JSON tags, percentile aggregates |
 
 ### v0.2 (Planned)
 
 - REST API on daemon (`:9090/api`)
-- PostgreSQL support for team deployments
+- PostgreSQL backend
 - Z-score anomaly detection + seasonal baselines
 - Embedded local web dashboard
-- Redpanda native tab (Raft health, tiered storage)
 - Kafka Connect module
 
 ### v0.3 (Planned)
@@ -65,31 +64,58 @@ streampulse dlq replay --topic orders.dlq --dry-run
 - ClickHouse analytics backend
 - Kafka Streams + Flink monitoring
 - Schema Registry compatibility
-- Capacity forecasting + cost attribution
 
 ## Configuration
 
-```yaml
-# ~/.streampulse/config.yaml
-brokers:
-  - localhost:9092
+Precedence: **defaults < YAML file < env (`STREAMPULSE_*`) < flags**.
 
+Config file: `--config <path>`, `$STREAMPULSE_CONFIG`, `~/.config/streampulse/streampulse.yaml`, or `/etc/streampulse/streampulse.yaml`.
+
+```yaml
+# ~/.config/streampulse/streampulse.yaml
+brokers: ["localhost:9093"]
+cluster_id: local-dev
 scrape_interval: 5s
 
 storage:
-  type: sqlite                # default; also: postgres, clickhouse
+  type: sqlite            # sqlite | postgres (v0.2) | clickhouse (v0.3)
   sqlite:
     path: ~/.streampulse/state.db
 
+kafka:
+  tls:
+    enabled: false
+    ca_file: ""
+    cert_file: ""         # mTLS
+    key_file: ""
+  sasl:
+    mechanism: ""         # plain | scram-sha-256 | scram-sha-512 | aws-iam
+    username: ""
+    password_env: STREAMPULSE_SASL_PASSWORD
+
+prometheus:
+  listen: ":9090"
+  path: /metrics
+
 alerts:
-  - name: "high-consumer-lag"
-    group: "*-processor"
-    condition: "lag > 10000"
-    for: 30s
+  - name: consumer-lag
+    condition: "lag > 1000"
+    for: 2m
+    severity: warning
     notify:
       - type: slack
-        webhook: "https://hooks.slack.com/..."
+        webhook_env: SLACK_WEBHOOK_URL
 ```
+
+Secrets (passwords, webhook URLs) are referenced by `*_env` names — never stored in the YAML.
+
+## `check` exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | All checks passed |
+| 1 | A check failed (threshold exceeded) |
+| 2 | Usage/config/connectivity error |
 
 ## Building from Source
 
@@ -98,7 +124,7 @@ git clone https://github.com/pulsedev/streampulse.git
 cd streampulse
 make build        # → bin/streampulse
 make run          # → build + run TUI
-make test         # → run tests
+make test         # → go test -race ./...
 make lint         # → golangci-lint
 ```
 
@@ -106,16 +132,13 @@ make lint         # → golangci-lint
 
 | Layer | Choice |
 |-------|--------|
-| Language | Go 1.23+ |
+| Language | Go 1.25 |
 | TUI | [bubbletea](https://github.com/charmbracelet/bubbletea) |
 | Kafka | [kafka-go](https://github.com/segmentio/kafka-go) |
-| Storage | SQLite ([modernc](https://modernc.org/sqlite)), PostgreSQL, ClickHouse |
-| Metrics | Prometheus |
+| Storage | SQLite ([modernc](https://modernc.org/sqlite)) |
+| Metrics | [Prometheus client](https://github.com/prometheus/client_golang) |
+| Scheduling | [robfig/cron](https://github.com/robfig/cron) |
 
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
-
----
-
-Built by [PulseDev](https://pulsedev.dev). Also check out [ToolServe](https://toolserve.dev) — MCP server hosting.
