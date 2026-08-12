@@ -383,3 +383,50 @@ func TestQueryFromAfterTo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
+
+func TestPurgePerResolution(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	for _, ago := range []time.Duration{40 * 24 * time.Hour, 96 * time.Hour, 25 * time.Hour, 2 * time.Hour, 0} {
+		seedMetric(t, s, now.Add(-ago), 1)
+	}
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+
+	require.NoError(t, s.Purge(context.Background(), Retention{
+		Raw:    24 * time.Hour,
+		Hourly: 48 * time.Hour,
+		Daily:  30 * 24 * time.Hour,
+	}))
+
+	var count int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
+	assert.Equal(t, 2, count, "raw rows younger than 24h survive")
+
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM hourly_metrics`).Scan(&count))
+	assert.Equal(t, 3, count, "hourly buckets younger than 48h survive")
+
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM daily_metrics`).Scan(&count))
+	assert.Equal(t, 3, count, "daily buckets younger than 30d survive")
+}
+
+func TestPurgeZeroRetentionIsNoop(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	seedMetric(t, s, time.Now().UTC().Add(-40*24*time.Hour), 1)
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+
+	require.NoError(t, s.Purge(context.Background(), Retention{}))
+
+	var count int
+	for _, table := range []string{"raw_metrics", "hourly_metrics", "daily_metrics"} {
+		require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
+		assert.Equal(t, 1, count, "no retention deletes nothing in %s", table)
+	}
+}

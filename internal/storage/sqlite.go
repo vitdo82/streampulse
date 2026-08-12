@@ -406,10 +406,29 @@ func computeAggregate(values []float64, count int64, sum float64) (aggregate, er
 	return out, nil
 }
 
+// Purge deletes data older than each per-resolution retention window. A zero
+// duration disables retention for that resolution.
 func (s *SQLiteStore) Purge(ctx context.Context, retention Retention) error {
-	cutoff := time.Now().Add(-retention.Raw)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM raw_metrics WHERE ts < ?`, cutoff.UnixMilli())
-	return err
+	now := time.Now()
+	if retention.Raw > 0 {
+		cutoff := now.Add(-retention.Raw).UnixMilli()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM raw_metrics WHERE ts < ?`, cutoff); err != nil {
+			return fmt.Errorf("purge raw_metrics: %w", err)
+		}
+	}
+	if retention.Hourly > 0 {
+		cutoff := now.Add(-retention.Hourly).UnixMilli()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM hourly_metrics WHERE bucket < ?`, cutoff); err != nil {
+			return fmt.Errorf("purge hourly_metrics: %w", err)
+		}
+	}
+	if retention.Daily > 0 {
+		cutoff := now.Add(-retention.Daily).UnixMilli()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM daily_metrics WHERE bucket < ?`, cutoff); err != nil {
+			return fmt.Errorf("purge daily_metrics: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) Ping(ctx context.Context) error {
