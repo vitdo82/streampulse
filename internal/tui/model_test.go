@@ -7,7 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -505,4 +507,191 @@ func TestLoadDataEmptyStore(t *testing.T) {
 	assert.Len(t, data.ConsumerGroups, 0)
 	require.NotEmpty(t, data.Logs)
 	assert.Contains(t, data.Logs[0], "store connected")
+}
+
+// ─── Analytics L2 panes (anomalies, rebalances, patterns) ──────────────────
+
+// seededL2Store seeds the data the L2 panes need: hourly kafka.group.lag with
+// a 500 spike after 4 weeks of 95/105 baseline (→ anomalies), kafka.group.state
+// transitions into PreparingRebalance for g1 (2) and g2 (1) (→ rebalances),
+// and 3 days of hourly kafka.topic.msg_rate for "orders" peaking at 09:00
+// (→ patterns).
+func seededL2Store(t *testing.T) *storage.SQLiteStore {
+	t.Helper()
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	ctx := context.Background()
+	t0 := time.Now().UTC().Truncate(time.Hour)
+	metrics := make([]storage.Metric, 0, 4*7*24+90)
+	for h := -(4*7*24 - 1); h <= -3; h++ {
+		v := 105.0
+		if h%2 == 0 {
+			v = 95.0
+		}
+		metrics = append(metrics, storage.Metric{
+			TS: t0.Add(time.Duration(h) * time.Hour), ClusterID: "local-dev",
+			Metric: scraper.MetricGroupLag, EntityType: "consumer_group", EntityName: "g1", Value: v,
+		})
+	}
+	metrics = append(metrics,
+		storage.Metric{TS: t0.Add(-2 * time.Hour), ClusterID: "local-dev", Metric: scraper.MetricGroupLag, EntityType: "consumer_group", EntityName: "g1", Value: 500},
+		storage.Metric{TS: t0.Add(-1 * time.Hour), ClusterID: "local-dev", Metric: scraper.MetricGroupLag, EntityType: "consumer_group", EntityName: "g1", Value: 500},
+	)
+
+	day0 := time.Now().UTC().Truncate(24 * time.Hour)
+	seq := []float64{4, 1, 2, 3, 1, 2, 3, 1} // g1: 2 rebalances two days ago
+	for i, v := range seq {
+		metrics = append(metrics, storage.Metric{
+			TS: day0.Add(-48*time.Hour + time.Duration(i)*5*time.Second), ClusterID: "local-dev",
+			Metric: scraper.MetricGroupState, EntityType: "consumer_group", EntityName: "g1", Value: v,
+		})
+	}
+	seq = []float64{1, 2, 3, 1} // g2: 1 rebalance yesterday
+	for i, v := range seq {
+		metrics = append(metrics, storage.Metric{
+			TS: day0.Add(-24*time.Hour + time.Duration(i)*5*time.Second), ClusterID: "local-dev",
+			Metric: scraper.MetricGroupState, EntityType: "consumer_group", EntityName: "g2", Value: v,
+		})
+	}
+
+	for i := 0; i < 72; i++ {
+		v := 10.0
+		if (i % 24) == 9 {
+			v = 100.0
+		}
+		metrics = append(metrics, storage.Metric{
+			TS: day0.Add(time.Duration(i-72) * time.Hour), ClusterID: "local-dev",
+			Metric: scraper.MetricTopicMsgRate, EntityType: "topic", EntityName: "orders", Value: v,
+		})
+	}
+
+	require.NoError(t, store.WriteBatch(ctx, metrics))
+	require.NoError(t, store.Rollup(ctx, "hourly"))
+	return store
+}
+
+func TestLoadDataPopulatesL2AnalyticsPanes(t *testing.T) {
+	store := seededL2Store(t)
+	m := NewModelWithStore(store)
+	m.topics = []TopicRow{{Name: "orders"}} // topics applied from a previous tick
+
+	data := m.loadData()
+
+	require.False(t, data.Failed)
+	require.NotEmpty(t, m.anomalies, "lag spike must produce anomalies")
+	assert.Equal(t, "g1", m.anomalies[0].Entity)
+
+	require.Len(t, m.rebalances, 2)
+	assert.Equal(t, "g1", m.rebalances[0].Group)
+	assert.Equal(t, 2, m.rebalances[0].Count)
+	assert.Equal(t, "g2", m.rebalances[1].Group)
+	assert.Equal(t, 1, m.rebalances[1].Count)
+
+	require.Len(t, m.patterns, 1)
+	assert.Equal(t, "orders", m.patterns[0].Topic)
+	assert.Equal(t, 9, m.patterns[0].PeakHour)
+}
+
+func TestL2AnalyticsRespectsRefreshInterval(t *testing.T) {
+	store := seededL2Store(t)
+	m := NewModelWithStore(store)
+	m.topics = []TopicRow{{Name: "orders"}}
+	now := time.Now()
+	m.now = func() time.Time { return now }
+
+	m.loadData()
+	require.NotEmpty(t, m.anomalies)
+	require.NotEmpty(t, m.rebalances)
+	require.NotEmpty(t, m.patterns)
+
+	// A second load within the refresh interval must not recompute: wipe the
+	// caches and load again — they must stay empty.
+	m.anomalies = nil
+	m.rebalances = nil
+	m.patterns = nil
+	m.loadData()
+	assert.Empty(t, m.anomalies, "analytics must not be recomputed within the refresh interval")
+	assert.Empty(t, m.rebalances)
+	assert.Empty(t, m.patterns)
+}
+
+func TestRenderAnalyticsViewShowsL2Sections(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.ready = true
+	m.anomalies = []analytics.Anomaly{
+		{Metric: scraper.MetricGroupLag, Entity: "g1", Time: time.Now(), Value: 500, Expected: 100, ZScore: 4.12, Direction: "high", Severity: "warning"},
+	}
+	m.rebalances = []analytics.RebalanceReport{
+		{Group: "g1", Day: time.Now().UTC().Truncate(24 * time.Hour), Count: 2},
+	}
+	m.patterns = []analytics.ThroughputReport{{Topic: "orders", Metric: scraper.MetricTopicMsgRate, PeakHour: 9, Forecast7d: 11.2}}
+
+	view := m.renderAnalyticsView()
+	assert.Contains(t, view, "ANOMALIES")
+	assert.Contains(t, view, "REBALANCES")
+	assert.Contains(t, view, "PATTERNS")
+	assert.Contains(t, view, "g1")
+	assert.Contains(t, view, "500.0")
+	assert.Contains(t, view, m.rebalances[0].Day.Format("2006-01-02"))
+	assert.Contains(t, view, "orders")
+	assert.Contains(t, view, "11.2")
+}
+
+func TestRenderAnalyticsViewEmptyL2Sections(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 120
+
+	view := m.renderAnalyticsView()
+	assert.Contains(t, view, "no anomaly data")
+	assert.Contains(t, view, "no rebalance data")
+	assert.Contains(t, view, "no data")
+}
+
+func TestJKCyclesPatternsOnAnalyticsTab(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.activeTab = 5
+	m.patterns = []analytics.ThroughputReport{{Topic: "orders"}, {Topic: "payments"}, {Topic: "audit"}}
+
+	tm, _ := m.Update(key("j"))
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.patternIdx, "j selects the next pattern")
+
+	tm, _ = m.Update(key("j"))
+	m = tm.(*Model)
+	assert.Equal(t, 2, m.patternIdx)
+
+	tm, _ = m.Update(key("j"))
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.patternIdx, "j wraps around")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.patternIdx, "down arrow cycles patterns too")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.patternIdx, "up arrow cycles patterns back")
+
+	tm, _ = m.Update(key("k"))
+	m = tm.(*Model)
+	assert.Equal(t, 2, m.patternIdx, "k cycles backwards and wraps")
+}
+
+func TestJKWithoutPatternsKeepsAnalyticsSelection(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.activeTab = 5
+	m.analytics = []analytics.GrowthReport{{Topic: "a", Delta: 1}, {Topic: "b", Delta: 2}}
+
+	tm, _ := m.Update(key("j"))
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.selectedTopic, "no patterns → j keeps cycling the growth selection")
+
+	tm, _ = m.Update(key("k"))
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.selectedTopic)
 }
