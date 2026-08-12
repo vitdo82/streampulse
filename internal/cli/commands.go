@@ -20,6 +20,7 @@ import (
 	"github.com/pulsedev/streampulse/internal/daemon"
 	"github.com/pulsedev/streampulse/internal/dlq"
 	"github.com/pulsedev/streampulse/internal/kafka"
+	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/pulsedev/streampulse/internal/tui"
 	"github.com/spf13/cobra"
@@ -471,11 +472,14 @@ func newDLQReplayCommand() *cobra.Command {
 
 func newAnalyzeCommand() *cobra.Command {
 	var (
-		windowStr string
-		topicsStr string
-		skew      bool
-		retention bool
-		jsonOut   bool
+		windowStr       string
+		topicsStr       string
+		skew            bool
+		retention       bool
+		anomalyMetrics  []string
+		rebalanceGroups []string
+		patternsMetric  string
+		jsonOut         bool
 	)
 	cmd := &cobra.Command{
 		Use:   "analyze",
@@ -496,6 +500,23 @@ func newAnalyzeCommand() *cobra.Command {
 				}
 			}
 
+			runAnomalies := cmd.Flags().Changed("anomalies")
+			var anomalyMetricNames []string
+			if runAnomalies {
+				anomalyMetricNames, err = resolveAnomalyMetrics(anomalyMetrics)
+				if err != nil {
+					return err
+				}
+			}
+			var patternMetric string
+			if patternsMetric != "" {
+				patternMetric, err = resolvePatternMetric(patternsMetric)
+				if err != nil {
+					return err
+				}
+			}
+			runRebalances := cmd.Flags().Changed("rebalances")
+
 			store, err := storage.NewStore(cfg.Storage.Type, cfg.Storage.SQLite.Path)
 			if err != nil {
 				return err
@@ -514,6 +535,14 @@ func newAnalyzeCommand() *cobra.Command {
 				return fmt.Errorf("analyze: growth: %w", err)
 			}
 			growth = topGrowth(growth, 10)
+
+			var patternReports []analytics.ThroughputReport
+			if patternMetric != "" {
+				patternReports, err = analyzer.Patterns(cmd.Context(), topics, patternMetric, window)
+				if err != nil {
+					return fmt.Errorf("analyze: patterns: %w", err)
+				}
+			}
 
 			var skewReports []analytics.SkewReport
 			if skew {
@@ -536,20 +565,51 @@ func newAnalyzeCommand() *cobra.Command {
 				}
 			}
 
-			if len(growth) == 0 && len(skewReports) == 0 && len(retentionReports) == 0 {
+			var anomalyReports []analytics.Anomaly
+			if runAnomalies {
+				anomalyReports, err = analyzer.Anomalies(cmd.Context(), anomalyMetricNames, window)
+				if err != nil {
+					return fmt.Errorf("analyze: anomalies: %w", err)
+				}
+			}
+			var rebalanceReports []analytics.RebalanceReport
+			if runRebalances {
+				rebalanceReports, err = analyzer.Rebalances(cmd.Context(), rebalanceGroups, window)
+				if err != nil {
+					return fmt.Errorf("analyze: rebalances: %w", err)
+				}
+			}
+
+			if len(growth) == 0 && len(patternReports) == 0 && len(skewReports) == 0 &&
+				len(retentionReports) == 0 && len(anomalyReports) == 0 && len(rebalanceReports) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "no data")
 				return nil
 			}
 			if jsonOut {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
-					Growth    []analytics.GrowthReport    `json:"growth,omitempty"`
-					Skew      []analytics.SkewReport      `json:"skew,omitempty"`
-					Retention []analytics.RetentionReport `json:"retention,omitempty"`
-				}{Growth: growth, Skew: skewReports, Retention: retentionReports})
+				sections := map[string]any{"growth": emptySlice(growth)}
+				if patternMetric != "" {
+					sections["patterns"] = emptySlice(patternReports)
+				}
+				if skew {
+					sections["skew"] = emptySlice(skewReports)
+				}
+				if retention {
+					sections["retention"] = emptySlice(retentionReports)
+				}
+				if runAnomalies {
+					sections["anomalies"] = emptySlice(anomalyReports)
+				}
+				if runRebalances {
+					sections["rebalances"] = emptySlice(rebalanceReports)
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(sections)
 			}
 			printGrowthReport(cmd.OutOrStdout(), growth)
+			printPatternReport(cmd.OutOrStdout(), patternReports)
 			printSkewReport(cmd.OutOrStdout(), skewReports)
 			printRetentionReport(cmd.OutOrStdout(), retentionReports)
+			printAnomalyReport(cmd.OutOrStdout(), anomalyReports)
+			printRebalanceReport(cmd.OutOrStdout(), rebalanceReports)
 			return nil
 		},
 	}
@@ -557,8 +617,62 @@ func newAnalyzeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&topicsStr, "topics", "", "Comma-separated topic filter (default: top 10 by message volume)")
 	cmd.Flags().BoolVar(&skew, "skew", false, "Include the partition skew report")
 	cmd.Flags().BoolVar(&retention, "retention", false, "Include the retention report")
+	cmd.Flags().StringSliceVar(&anomalyMetrics, "anomalies", nil, "Detect anomalies for these metrics (lag, msg_rate, bytes_rate; default all)")
+	cmd.Flags().StringSliceVar(&rebalanceGroups, "rebalances", nil, "Show rebalance history (optional: comma-separated group filters)")
+	cmd.Flags().StringVar(&patternsMetric, "patterns", "", "Show throughput patterns for a metric (msg_rate, bytes_rate)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output full report structs as JSON")
 	return cmd
+}
+
+// resolveAnomalyMetrics maps --anomalies values (full metric names or their
+// last-segment aliases, e.g. "lag") to full metric names. An empty selection
+// means all anomaly metrics.
+func resolveAnomalyMetrics(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		full, ok := anomalyMetric(n)
+		if !ok {
+			return nil, fmt.Errorf("analyze: --anomalies: unknown metric %q (use lag, msg_rate, or bytes_rate)", n)
+		}
+		out = append(out, full)
+	}
+	return out, nil
+}
+
+// anomalyMetric resolves one --anomalies value to a full metric name.
+func anomalyMetric(name string) (string, bool) {
+	for _, m := range analytics.AnomalyMetrics {
+		if m == name {
+			return m, true
+		}
+		if i := strings.LastIndexByte(m, '.'); i >= 0 && m[i+1:] == name {
+			return m, true
+		}
+	}
+	return "", false
+}
+
+// resolvePatternMetric maps the --patterns value to the topic rate metric.
+func resolvePatternMetric(name string) (string, error) {
+	switch name {
+	case "msg_rate":
+		return scraper.MetricTopicMsgRate, nil
+	case "bytes_rate":
+		return scraper.MetricTopicBytesRate, nil
+	}
+	return "", fmt.Errorf("analyze: --patterns: unknown metric %q (use msg_rate or bytes_rate)", name)
+}
+
+// emptySlice returns a non-nil empty slice for nil input so JSON sections
+// marshal as [] instead of null.
+func emptySlice[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 // topGrowth keeps the n topics with the highest total message rate in the
@@ -587,6 +701,54 @@ func printGrowthReport(w io.Writer, reports []analytics.GrowthReport) {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	for _, r := range reports {
 		fmt.Fprintf(tw, "  %s\t%s\t%+.2f msgs/s\n", r.Topic, r.Sparkline, r.Delta)
+	}
+	tw.Flush()
+}
+
+// printPatternReport renders the per-topic throughput profiles with the
+// hourly barchart.
+func printPatternReport(w io.Writer, reports []analytics.ThroughputReport) {
+	if len(reports) == 0 {
+		return
+	}
+	labels := make([]string, 24)
+	for h := range labels {
+		labels[h] = fmt.Sprintf("%02d:00", h)
+	}
+	fmt.Fprintln(w, "PATTERNS")
+	for _, r := range reports {
+		fmt.Fprintf(w, "  %s (%s) peak %s %02d:00, slope %+.4g/s, forecast 7d %.2f\n",
+			r.Topic, r.Metric, time.Weekday(r.PeakDay), r.PeakHour, r.Slope, r.Forecast7d)
+		fmt.Fprintln(w, analytics.Bars(labels, r.HourlyProfile[:], 60))
+	}
+}
+
+// printAnomalyReport renders the flagged anomaly rows.
+func printAnomalyReport(w io.Writer, anomalies []analytics.Anomaly) {
+	if len(anomalies) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "ANOMALIES")
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "METRIC\tENTITY\tTIME\tVALUE\tEXPECTED\tZ\tDIR\tSEVERITY")
+	for _, a := range anomalies {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
+			a.Metric, a.Entity, a.Time.UTC().Format("2006-01-02 15:04:05 UTC"),
+			a.Value, a.Expected, a.ZScore, a.Direction, a.Severity)
+	}
+	tw.Flush()
+}
+
+// printRebalanceReport renders per-group per-day rebalance counts.
+func printRebalanceReport(w io.Writer, reports []analytics.RebalanceReport) {
+	if len(reports) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "REBALANCES")
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "GROUP\tDAY\tCOUNT")
+	for _, r := range reports {
+		fmt.Fprintf(tw, "%s\t%s\t%d\n", r.Group, r.Day.Format("2006-01-02"), r.Count)
 	}
 	tw.Flush()
 }
