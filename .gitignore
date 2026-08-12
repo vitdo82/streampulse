@@ -1,6 +1,6 @@
 # Binaries
 bin/
-streampulse
+/bin/streampulse
 *.exe
 *.dll
 *.so
