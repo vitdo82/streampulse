@@ -22,6 +22,7 @@ type Client interface {
 	ListTopics(ctx context.Context) ([]kafka.TopicInfo, error)
 	ListConsumerGroups(ctx context.Context) ([]kafka.GroupInfo, error)
 	TopicOffsets(ctx context.Context) (map[string]map[int]int64, error)
+	GroupLag(ctx context.Context) (map[string]map[string]int64, error)
 }
 
 // Compile-time check that the concrete kafka client satisfies the interface.

@@ -122,3 +122,62 @@ func (t *topicCollector) Collect(ctx context.Context, now time.Time) ([]storage.
 	t.prev = snap
 	return metrics, nil
 }
+
+// groupCollector emits per-group total lag, member count, and mapped state,
+// plus per-topic lag rows tagged with the topic name.
+type groupCollector struct {
+	client    Client
+	clusterID string
+}
+
+func newGroupCollector(client Client, clusterID string) *groupCollector {
+	return &groupCollector{client: client, clusterID: clusterID}
+}
+
+func (g *groupCollector) Collect(ctx context.Context, now time.Time) ([]storage.Metric, error) {
+	groups, err := g.client.ListConsumerGroups(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list consumer groups: %w", err)
+	}
+	lag, err := g.client.GroupLag(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("group lag: %w", err)
+	}
+
+	metrics := make([]storage.Metric, 0, len(groups)*3)
+	for _, grp := range groups {
+		perTopic := lag[grp.Name]
+		total := int64(0)
+		for _, l := range perTopic {
+			total += l
+		}
+		metrics = append(metrics,
+			storage.Metric{TS: now, ClusterID: g.clusterID, Metric: MetricGroupLag, EntityType: "consumer_group", EntityName: grp.Name, Value: float64(total)},
+			storage.Metric{TS: now, ClusterID: g.clusterID, Metric: MetricGroupMemberCount, EntityType: "consumer_group", EntityName: grp.Name, Value: float64(grp.Members)},
+			storage.Metric{TS: now, ClusterID: g.clusterID, Metric: MetricGroupState, EntityType: "consumer_group", EntityName: grp.Name, Value: groupStateValue(grp.State)},
+		)
+		for topic, l := range perTopic {
+			metrics = append(metrics, storage.Metric{TS: now, ClusterID: g.clusterID, Metric: MetricGroupLag, EntityType: "consumer_group", EntityName: grp.Name, Tags: map[string]string{"topic": topic}, Value: float64(l)})
+		}
+	}
+	return metrics, nil
+}
+
+// groupStateValue maps a Kafka group state string to the scraper.md enum:
+// 0=Empty 1=Stable 2=PreparingRebalance 3=CompletingRebalance 4=Dead.
+func groupStateValue(state string) float64 {
+	switch state {
+	case "Empty":
+		return 0
+	case "Stable":
+		return 1
+	case "PreparingRebalance":
+		return 2
+	case "CompletingRebalance":
+		return 3
+	case "Dead":
+		return 4
+	default:
+		return -1
+	}
+}

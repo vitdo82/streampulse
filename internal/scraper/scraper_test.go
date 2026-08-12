@@ -41,6 +41,10 @@ func (f *fakeClient) TopicOffsets(ctx context.Context) (map[string]map[int]int64
 	return f.offsets, f.err
 }
 
+func (f *fakeClient) GroupLag(ctx context.Context) (map[string]map[string]int64, error) {
+	return f.lags, f.err
+}
+
 type fakeCollector struct {
 	metrics []storage.Metric
 	err     error
@@ -273,4 +277,124 @@ func TestTopicCollectorError(t *testing.T) {
 	_, err := c.Collect(context.Background(), time.Now())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "broker down")
+}
+
+func TestGroupStateMapping(t *testing.T) {
+	cases := map[string]float64{
+		"Empty":               0,
+		"Stable":              1,
+		"PreparingRebalance":  2,
+		"CompletingRebalance": 3,
+		"Dead":                4,
+		"Bogus":               -1,
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, groupStateValue(in), "state %q", in)
+	}
+}
+
+// groupMetricsByEntity groups collector output by entity name.
+func groupMetricsByEntity(metrics []storage.Metric) map[string][]storage.Metric {
+	out := make(map[string][]storage.Metric)
+	for _, m := range metrics {
+		out[m.EntityName] = append(out[m.EntityName], m)
+	}
+	return out
+}
+
+// metricWithTags finds the first metric with the given name and tag set.
+func metricWithTags(ms []storage.Metric, name string, tags map[string]string) (storage.Metric, bool) {
+	for _, m := range ms {
+		if m.Metric != name {
+			continue
+		}
+		if len(m.Tags) != len(tags) {
+			continue
+		}
+		match := true
+		for k, v := range tags {
+			if m.Tags[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			return m, true
+		}
+	}
+	return storage.Metric{}, false
+}
+
+func TestGroupCollector(t *testing.T) {
+	client := &fakeClient{
+		groups: []kafka.GroupInfo{
+			{Name: "orders-processor", State: "Stable", Members: 3},
+			{Name: "dead-group", State: "Dead", Members: 0},
+		},
+		lags: map[string]map[string]int64{
+			"orders-processor": {"orders": 150, "payments": 10},
+			"dead-group":       {},
+		},
+	}
+	c := newGroupCollector(client, testClusterID)
+
+	metrics, err := c.Collect(context.Background(), time.Now())
+	require.NoError(t, err)
+	byEntity := groupMetricsByEntity(metrics)
+	require.Len(t, byEntity["orders-processor"], 5)
+	require.Len(t, byEntity["dead-group"], 3)
+
+	for _, m := range metrics {
+		assert.Equal(t, testClusterID, m.ClusterID)
+		assert.Equal(t, "consumer_group", m.EntityType)
+	}
+
+	orders := byEntity["orders-processor"]
+	dead := byEntity["dead-group"]
+
+	total, ok := metricWithTags(orders, MetricGroupLag, nil)
+	require.True(t, ok)
+	assert.Equal(t, 160.0, total.Value)
+
+	perTopic, ok := metricWithTags(orders, MetricGroupLag, map[string]string{"topic": "orders"})
+	require.True(t, ok)
+	assert.Equal(t, 150.0, perTopic.Value)
+
+	members, ok := metricWithTags(orders, MetricGroupMemberCount, nil)
+	require.True(t, ok)
+	assert.Equal(t, 3.0, members.Value)
+
+	state, ok := metricWithTags(orders, MetricGroupState, nil)
+	require.True(t, ok)
+	assert.Equal(t, 1.0, state.Value)
+
+	deadTotal, ok := metricWithTags(dead, MetricGroupLag, nil)
+	require.True(t, ok)
+	assert.Equal(t, 0.0, deadTotal.Value)
+
+	deadState, ok := metricWithTags(dead, MetricGroupState, nil)
+	require.True(t, ok)
+	assert.Equal(t, 4.0, deadState.Value)
+
+	deadMembers, ok := metricWithTags(dead, MetricGroupMemberCount, nil)
+	require.True(t, ok)
+	assert.Equal(t, 0.0, deadMembers.Value)
+}
+
+func TestGroupCollectorNoGroups(t *testing.T) {
+	client := &fakeClient{}
+	c := newGroupCollector(client, testClusterID)
+
+	metrics, err := c.Collect(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Empty(t, metrics)
+}
+
+func TestGroupCollectorError(t *testing.T) {
+	client := &fakeClient{err: errors.New("cluster down")}
+	c := newGroupCollector(client, testClusterID)
+
+	_, err := c.Collect(context.Background(), time.Now())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cluster down")
 }
