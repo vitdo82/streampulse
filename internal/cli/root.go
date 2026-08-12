@@ -2,13 +2,17 @@
 package cli
 
 import (
+	"context"
+	"fmt"
+
+	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/spf13/cobra"
 )
 
+type cfgKey struct{}
+
 // NewRootCommand creates the root streampulse command with all subcommands.
 func NewRootCommand(version string) *cobra.Command {
-	var brokers []string
-
 	root := &cobra.Command{
 		Use:   "streampulse",
 		Short: "StreamPulse — the k9s for Apache Kafka",
@@ -22,12 +26,27 @@ Single binary. Zero dependencies. All views auto-refresh — no manual reload.
   streampulse check --topic orders         # CI/CD health gate
   streampulse dlq list                     # DLQ management`,
 		Version: version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cmd.Flags())
+			if err != nil {
+				return err
+			}
+			cmd.SetContext(context.WithValue(cmd.Context(), cfgKey{}, cfg))
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTUI(brokers)
+			cfg, err := CfgFromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			return runTUI(cfg)
 		},
 	}
 
-	root.PersistentFlags().StringSliceVar(&brokers, "brokers", []string{"localhost:9093"}, "Kafka broker addresses (comma-separated)")
+	root.PersistentFlags().String("config", "", "Path to YAML config file")
+	// Registered without a default: DefaultConfig supplies localhost:9093 so
+	// file and STREAMPULSE_BROKERS keep their precedence below the flag.
+	root.PersistentFlags().StringSlice("brokers", nil, "Kafka broker addresses (comma-separated)")
 
 	root.AddCommand(newServeCommand())
 	root.AddCommand(newCheckCommand())
@@ -36,4 +55,13 @@ Single binary. Zero dependencies. All views auto-refresh — no manual reload.
 	root.AddCommand(newAlertsCommand())
 
 	return root
+}
+
+// CfgFromContext returns the config loaded by the root PersistentPreRunE.
+func CfgFromContext(ctx context.Context) (*config.Config, error) {
+	cfg, ok := ctx.Value(cfgKey{}).(*config.Config)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("config not loaded")
+	}
+	return cfg, nil
 }
