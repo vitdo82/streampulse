@@ -46,6 +46,19 @@ func NewSQLiteStore(dsn string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1) // SQLite: single writer
 	db.SetMaxIdleConns(1)
 
+	// WAL mode enables concurrent readers while the daemon writes; both
+	// PRAGMAs are per-connection, so set them before any other use (the
+	// pool is capped at one connection above). Memory-backed stores have
+	// no journal, so skip them.
+	if dsn != ":memory:" {
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			return nil, fmt.Errorf("enable WAL: %w", err)
+		}
+		if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+			return nil, fmt.Errorf("set busy timeout: %w", err)
+		}
+	}
+
 	store := &SQLiteStore{db: db}
 	if err := store.Migrate(context.Background()); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -118,7 +131,8 @@ func (s *SQLiteStore) Ping(ctx context.Context) error {
 }
 
 func (s *SQLiteStore) Migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	// v1: baseline schema (idempotent).
+	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS raw_metrics (
 			ts          INTEGER NOT NULL,
 			cluster_id  TEXT NOT NULL,
@@ -138,8 +152,50 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 			last_value   REAL,
 			notify_count INTEGER DEFAULT 0
 		);
-	`)
-	return err
+	`); err != nil {
+		return fmt.Errorf("migrate v1: %w", err)
+	}
+
+	// v2: aggregate tables for hourly/daily rollup, guarded by user_version.
+	var version int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version < 2 {
+		if _, err := s.db.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS hourly_metrics (
+				bucket      INTEGER NOT NULL,   -- truncated-to-hour unix ms
+				cluster_id  TEXT NOT NULL,
+				metric      TEXT NOT NULL,
+				entity_type TEXT NOT NULL,
+				entity_name TEXT NOT NULL,
+				tags        TEXT NOT NULL DEFAULT '{}',
+				avg REAL, min REAL, max REAL,
+				p50 REAL, p95 REAL, p99 REAL,
+				count INTEGER, sum REAL,
+				PRIMARY KEY (bucket, cluster_id, metric, entity_type, entity_name, tags)
+			);
+			CREATE TABLE IF NOT EXISTS daily_metrics (
+				bucket      INTEGER NOT NULL,   -- truncated-to-day unix ms
+				cluster_id  TEXT NOT NULL,
+				metric      TEXT NOT NULL,
+				entity_type TEXT NOT NULL,
+				entity_name TEXT NOT NULL,
+				tags        TEXT NOT NULL DEFAULT '{}',
+				avg REAL, min REAL, max REAL,
+				p50 REAL, p95 REAL, p99 REAL,
+				count INTEGER, sum REAL,
+				PRIMARY KEY (bucket, cluster_id, metric, entity_type, entity_name, tags)
+			);
+			CREATE INDEX IF NOT EXISTS idx_hourly_lookup ON hourly_metrics(cluster_id, metric, entity_type, entity_name, bucket);
+			CREATE INDEX IF NOT EXISTS idx_daily_lookup  ON daily_metrics(cluster_id, metric, entity_type, entity_name, bucket);
+			PRAGMA user_version = 2;
+		`); err != nil {
+			return fmt.Errorf("migrate v2: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (s *SQLiteStore) Close() error {
