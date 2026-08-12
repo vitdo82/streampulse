@@ -80,6 +80,10 @@ func (f *fakeStore) QueryDaily(ctx context.Context, params storage.QueryParams) 
 	return nil, nil
 }
 
+func (f *fakeStore) QueryStateTransitions(ctx context.Context, params storage.QueryParams) ([]storage.StateTransition, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) Rollup(ctx context.Context, resolution string) error {
 	return nil
 }

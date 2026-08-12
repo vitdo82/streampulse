@@ -38,6 +38,14 @@ type MetricRow struct {
 	Sum        float64           `json:"sum"`
 }
 
+// StateTransition is a consecutive value change for one entity.
+type StateTransition struct {
+	Time   time.Time
+	Entity string
+	From   float64 // previous sampled value
+	To     float64 // new value
+}
+
 // QueryParams filters metric queries.
 type QueryParams struct {
 	ClusterID  string
@@ -77,6 +85,10 @@ type MetricsStore interface {
 	QueryRaw(ctx context.Context, params QueryParams) ([]MetricRow, error)
 	QueryHourly(ctx context.Context, params QueryParams) ([]MetricRow, error)
 	QueryDaily(ctx context.Context, params QueryParams) ([]MetricRow, error)
+
+	// QueryStateTransitions returns the state-value transitions (consecutive
+	// samples where the value changed) for a metric, in time order.
+	QueryStateTransitions(ctx context.Context, params QueryParams) ([]StateTransition, error)
 
 	// Rollup aggregates raw → hourly and hourly → daily.
 	Rollup(ctx context.Context, resolution string) error

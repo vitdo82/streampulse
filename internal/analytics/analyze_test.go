@@ -51,6 +51,10 @@ func (f *fakeStore) QueryDaily(ctx context.Context, params storage.QueryParams) 
 	return f.daily[key(params.Metric, params.EntityName)], nil
 }
 
+func (f *fakeStore) QueryStateTransitions(ctx context.Context, params storage.QueryParams) ([]storage.StateTransition, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) QueryRaw(ctx context.Context, params storage.QueryParams) ([]storage.MetricRow, error) {
 	f.queries = append(f.queries, params)
 	if f.err != nil {

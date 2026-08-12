@@ -457,3 +457,46 @@ func TestWriteBatchRejectsNonFinite(t *testing.T) {
 	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
 	assert.Equal(t, 1, count)
 }
+
+func TestQueryStateTransitions(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Now().Truncate(time.Hour).Add(-48 * time.Hour)
+	seq := []float64{1, 2, 3, 1, 1, 2, 1, 2, 2, 3, 1} // states: 3 rebalances into Preparing (idx1, idx5, idx7)
+	metrics := make([]Metric, 0, len(seq))
+	for i, v := range seq {
+		metrics = append(metrics, Metric{
+			TS:         base.Add(time.Duration(i) * 5 * time.Second),
+			ClusterID:  "c1",
+			Metric:     "kafka.group.state",
+			EntityType: "consumer_group",
+			EntityName: "orders-processor",
+			Value:      v,
+		})
+	}
+	require.NoError(t, s.WriteBatch(context.Background(), metrics))
+
+	rows, err := s.QueryStateTransitions(context.Background(), QueryParams{
+		Metric:     "kafka.group.state",
+		EntityName: "orders-processor",
+		From:       base,
+		To:         base.Add(2 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	// One row per consecutive value change: idx1 1→2, idx2 2→3, idx3 3→1,
+	// idx5 1→2, idx6 2→1, idx7 1→2, idx9 2→3, idx10 3→1.
+	assert.Len(t, rows, 8)
+
+	// Rebalance semantics: transitions into Preparing (To == 2 with From != 2)
+	// at idx1, idx5, idx7 — deduping repeated 2→2 samples.
+	preparing := 0
+	for _, tr := range rows {
+		if tr.To == 2 && tr.From != 2 {
+			preparing++
+		}
+	}
+	assert.Equal(t, 3, preparing)
+}
