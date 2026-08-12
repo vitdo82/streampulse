@@ -26,6 +26,9 @@ var metricAliases = map[string]string{
 	"growth_rate": "dlq.topic.growth_rate",
 	"up":          "kafka.broker.up",
 	"skew":        "kafka.cluster.partition_skew",
+	// Daemon-internal counters evaluated by the engine, not part of the
+	// scraper batch; registered so conditions can reference them.
+	"scrape_errors_total": "scrape_errors_total",
 }
 
 // validOps is the supported operator whitelist.
