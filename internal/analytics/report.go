@@ -36,7 +36,7 @@ type Anomaly struct {
 	Expected  float64   `json:"expected"`
 	ZScore    float64   `json:"z_score"`
 	Direction string    `json:"direction"` // high | low
-	Severity  string    `json:"severity"`  // warning | critical
+	Severity  string    `json:"severity"`  // warning (single threshold: |z| >= 2)
 }
 
 // ThroughputReport describes the time-of-day/day-of-week profile and trend of

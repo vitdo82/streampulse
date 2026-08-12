@@ -491,7 +491,7 @@ func newAnalyzeCommand() *cobra.Command {
 			}
 			window, err := time.ParseDuration(windowStr)
 			if err != nil || window <= 0 {
-				return fmt.Errorf("analyze: invalid window %q (e.g. 24h, 7d)", windowStr)
+				return fmt.Errorf("analyze: invalid window %q (e.g. 24h, 168h)", windowStr)
 			}
 			var topics []string
 			for _, t := range strings.Split(topicsStr, ",") {
@@ -613,7 +613,7 @@ func newAnalyzeCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&windowStr, "window", "24h", "Growth window (e.g. 1h, 24h, 7d)")
+	cmd.Flags().StringVar(&windowStr, "window", "24h", "Growth window (e.g. 1h, 24h, 168h)")
 	cmd.Flags().StringVar(&topicsStr, "topics", "", "Comma-separated topic filter (default: top 10 by message volume)")
 	cmd.Flags().BoolVar(&skew, "skew", false, "Include the partition skew report")
 	cmd.Flags().BoolVar(&retention, "retention", false, "Include the retention report")
