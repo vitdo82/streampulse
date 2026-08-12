@@ -138,6 +138,10 @@ type Model struct {
 	lastUpdated time.Time
 	loading     bool
 
+	// Topic search (active while searching)
+	searching   bool
+	searchQuery string
+
 	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
@@ -616,9 +620,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleDLQViewKey(msg))
 			break
 		}
+		if m.searching {
+			m.handleSearchKey(msg)
+			break
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "/":
+			m.searching = true
 		case "tab", "l", "right":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 		case "shift+tab", "h", "left":
@@ -626,10 +636,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.activeTab == 5 {
 				m.cycleAnalyticsSelection(1)
+			} else if t := m.activeTable(); t != nil {
+				t.MoveDown(1)
 			}
 		case "k", "up":
 			if m.activeTab == 5 {
 				m.cycleAnalyticsSelection(-1)
+			} else if t := m.activeTable(); t != nil {
+				t.MoveUp(1)
 			}
 		case "1", "2", "3", "4", "5", "6":
 			if idx := int(msg.Runes[0] - '1'); idx < len(m.tabs) {
@@ -680,6 +694,45 @@ func (m *Model) closeDLQView() {
 	m.dlqConfirm = false
 }
 
+// handleSearchKey handles keys while topic search is active: printable runes
+// append to the query, backspace removes, enter applies (leaving the filter
+// in place), esc and q close the search.
+func (m *Model) handleSearchKey(msg tea.KeyMsg) {
+	switch msg.String() {
+	case "esc", "q":
+		m.searching = false
+		m.searchQuery = ""
+	case "enter":
+		m.searching = false
+	case "backspace":
+		if r := []rune(m.searchQuery); len(r) > 0 {
+			m.searchQuery = string(r[:len(r)-1])
+		}
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.searchQuery += string(msg.Runes)
+		}
+	}
+}
+
+// activeTable returns the table of the active tab (nil for the Analytics tab,
+// which has no table).
+func (m *Model) activeTable() *table.Model {
+	switch m.activeTab {
+	case 0:
+		return &m.brokersTable
+	case 1:
+		return &m.topicsTable
+	case 2:
+		return &m.groupsTable
+	case 3:
+		return &m.alertsTable
+	case 4:
+		return &m.dlqTable
+	}
+	return nil
+}
+
 func (m *Model) applyData(d DataUpdated) {
 	if !d.Failed {
 		m.brokers = d.Brokers
@@ -715,7 +768,7 @@ func (m *Model) buildTables() {
 			{Title: "BYTES/S", Width: 12},
 			{Title: "RETENTION", Width: 12},
 		},
-		rowsFromTopics(m.topics),
+		rowsFromTopics(filteredTopics(m.topics, m.searchQuery)),
 	)
 
 	m.groupsTable = buildTable(
@@ -821,6 +874,23 @@ func rowsFromDLQ(d []DLQRow) []table.Row {
 		rows[i] = table.Row{dlq.Topic, dlq.MessageCount, dlq.Growth, dlq.ErrorPattern}
 	}
 	return rows
+}
+
+// filteredTopics returns the topics matching the search query (case-insensitive
+// contains on the topic name), or all topics when no query is set. The filter
+// stays applied after Enter closes the search; Esc clears the query.
+func filteredTopics(topics []TopicRow, query string) []TopicRow {
+	if query == "" {
+		return topics
+	}
+	q := strings.ToLower(query)
+	out := make([]TopicRow, 0, len(topics))
+	for _, t := range topics {
+		if strings.Contains(strings.ToLower(t.Name), q) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ─── View ──────────────────────────────────────────────────────────────────
@@ -1128,14 +1198,16 @@ func (m *Model) renderRetentionPane() string {
 }
 
 func (m *Model) renderHelp() string {
+	help := "tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s"
+	if m.searching {
+		help = fmt.Sprintf("/ search: %s  │  esc: close", m.searchQuery)
+	}
 	return helpStyle.Render(
 		lipgloss.NewStyle().
 			Background(lipgloss.Color("#1F1A2E")).
 			Width(m.width).
 			Padding(0, 2).
-			Render(
-				"tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  q: quit  │  Auto-refresh: 2s",
-			),
+			Render(help),
 	)
 }
 

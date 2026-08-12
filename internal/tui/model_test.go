@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/stretchr/testify/assert"
@@ -199,6 +200,201 @@ func TestTickGuardPreventsOverlappingRefreshes(t *testing.T) {
 	if !m.loading {
 		t.Error("expected loading=true again after DataUpdated")
 	}
+}
+
+// ─── Search ────────────────────────────────────────────────────────────────
+
+func key(runes string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(runes)}
+}
+
+func TestSearchSlashOpensSearchMode(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+
+	assert.True(t, m.searching)
+	assert.Empty(t, m.searchQuery)
+}
+
+func TestSearchTypingFiltersTopicsCaseInsensitive(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}, {Name: "orders.dlq"}}
+	m.buildTables()
+	require.Len(t, m.topicsTable.Rows(), 3)
+
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, _ = m.Update(key("ORD"))
+	m = tm.(*Model)
+	assert.Equal(t, "ORD", m.searchQuery)
+
+	m.buildTables()
+	require.Len(t, m.topicsTable.Rows(), 2, "case-insensitive contains filter")
+	assert.Equal(t, "orders", m.topicsTable.Rows()[0][0])
+	assert.Equal(t, "orders.dlq", m.topicsTable.Rows()[1][0])
+}
+
+func TestSearchBackspaceAndEsc(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}}
+	m.buildTables()
+
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, _ = m.Update(key("pay"))
+	m = tm.(*Model)
+	m.buildTables()
+	require.Len(t, m.topicsTable.Rows(), 1)
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = tm.(*Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = tm.(*Model)
+	assert.Equal(t, "p", m.searchQuery)
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(*Model)
+	assert.False(t, m.searching)
+	assert.Empty(t, m.searchQuery, "esc clears the query")
+
+	m.buildTables()
+	assert.Len(t, m.topicsTable.Rows(), 2, "cleared search shows all topics")
+}
+
+func TestSearchEnterAppliesFilter(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}}
+	m.buildTables()
+
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, _ = m.Update(key("pay"))
+	m = tm.(*Model)
+
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(*Model)
+	assert.False(t, m.searching, "enter leaves search mode")
+	assert.Equal(t, "pay", m.searchQuery, "enter keeps the query applied")
+	assert.Nil(t, cmd, "enter must not quit")
+
+	m.buildTables()
+	require.Len(t, m.topicsTable.Rows(), 1)
+	assert.Equal(t, "payments", m.topicsTable.Rows()[0][0])
+}
+
+func TestSearchQExitsSearchInsteadOfQuitting(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, cmd := m.Update(key("q"))
+	m = tm.(*Model)
+
+	assert.False(t, m.searching, "q exits search mode")
+	assert.Empty(t, m.searchQuery)
+	assert.Nil(t, cmd, "q while searching must not quit the program")
+
+	// q outside search still quits.
+	tm, cmd = m.Update(key("q"))
+	_ = tm
+	assert.NotNil(t, cmd, "q outside search quits")
+}
+
+func TestSearchKeyRDoesNotRefresh(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, cmd := m.Update(key("r"))
+	m = tm.(*Model)
+
+	assert.Equal(t, "r", m.searchQuery, "r appends to the query while searching")
+	assert.Nil(t, cmd, "r must not trigger a refresh while searching")
+}
+
+// ─── Table navigation ──────────────────────────────────────────────────────
+
+func TestJKMoveActiveTableCursor(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}, {Name: "audit"}}
+	m.ready = true
+	m.buildTables()
+	m.activeTab = 1
+
+	assert.Equal(t, 0, m.topicsTable.Cursor())
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.topicsTable.Cursor(), "j moves the topics cursor down")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "k moves the topics cursor up")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.topicsTable.Cursor(), "down arrow moves the cursor")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "up arrow moves the cursor")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.topicsTable.Cursor())
+
+	// The cursor moves only on the active tab's table.
+	m.consumerGroups = []ConsumerGroupRow{{Group: "g1"}, {Group: "g2"}, {Group: "g3"}}
+	m.buildTables()
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.topicsTable.Cursor())
+
+	m.activeTab = 2
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.topicsTable.Cursor(), "j on the consumers tab must not move the topics cursor")
+	assert.Equal(t, 1, m.groupsTable.Cursor(), "j on the consumers tab moves the groups cursor")
+}
+
+func TestJKClampsAtBoundsWithoutPanic(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}}
+	m.ready = true
+	m.buildTables()
+	m.activeTab = 1
+
+	for i := 0; i < 5; i++ {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = tm.(*Model)
+	}
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "cursor clamps at the last row")
+
+	for i := 0; i < 5; i++ {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+		m = tm.(*Model)
+	}
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "cursor clamps at the first row")
+
+	// Empty table (single no-data placeholder row) must not panic either.
+	m.topics = nil
+	m.buildTables()
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.topicsTable.Cursor())
+}
+
+func TestJKDisabledWhileSearching(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}, {Name: "audit"}}
+	m.ready = true
+	m.buildTables()
+	m.activeTab = 1
+
+	tm, _ := m.Update(key("/"))
+	m = tm.(*Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = tm.(*Model)
+
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "j appends to the query, not the cursor")
+	assert.Equal(t, "j", m.searchQuery)
 }
 
 // ─── Store mode (daemon persistence) ────────────────────────────────────────
