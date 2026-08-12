@@ -6,10 +6,13 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pulsedev/streampulse/internal/alerts"
+	"github.com/pulsedev/streampulse/internal/alerts/notify"
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/scraper"
@@ -21,9 +24,11 @@ import (
 // (daemon.md lifecycle step 6).
 const shutdownGrace = 10 * time.Second
 
-// Scraper is the scraping engine the daemon drives once per interval.
+// Scraper is the scraping engine the daemon drives once per interval. The
+// daemon persists the collected batch itself so the same batch feeds the
+// alert engine.
 type Scraper interface {
-	ScrapeAndStore(ctx context.Context) error
+	Collect(ctx context.Context) ([]storage.Metric, error)
 }
 
 // Client is the subset of the kafka client the daemon uses directly: it
@@ -32,8 +37,8 @@ type Client interface {
 	Ping(ctx context.Context) error
 }
 
-// Daemon hosts the scrape and rollup loops and the Prometheus endpoint.
-// Run blocks until the context is canceled or Shutdown is called.
+// Daemon hosts the scrape, rollup, and alert loops and the Prometheus
+// endpoint. Run blocks until the context is canceled or Shutdown is called.
 type Daemon struct {
 	cfg     *config.Config
 	store   storage.MetricsStore
@@ -42,6 +47,12 @@ type Daemon struct {
 
 	stats *ScrapeStats
 	prom  *PromServer
+
+	// latest is the most recent successful scrape batch, shared with the
+	// alert loop (daemon.md: alerts evaluate the last scrape's metrics).
+	latest *atomic.Pointer[[]storage.Metric]
+	// alerts is the alert engine; nil when alerts are disabled.
+	alerts *alerts.Engine
 
 	scraping  atomic.Bool // in-flight guard for the scrape loop
 	backoffFn func(int) time.Duration
@@ -70,7 +81,7 @@ func New(cfg *config.Config, store storage.MetricsStore, client *kafka.Client) *
 func NewWithOptions(cfg *config.Config, store storage.MetricsStore, client *kafka.Client, opts Options) *Daemon {
 	interval, _ := cfg.ParseScrapeInterval()
 	stats := NewScrapeStats()
-	return &Daemon{
+	d := &Daemon{
 		cfg:       cfg,
 		store:     store,
 		client:    client,
@@ -79,7 +90,66 @@ func NewWithOptions(cfg *config.Config, store storage.MetricsStore, client *kafk
 		prom:      NewPromServer(&cfg.Prometheus, stats, PromOptions{Version: opts.Version}),
 		backoffFn: exponentialBackoff,
 		stopped:   make(chan struct{}),
+		latest:    &atomic.Pointer[[]storage.Metric]{},
 	}
+	d.alerts = newAlertEngine(cfg, store)
+	return d
+}
+
+// newAlertEngine compiles the daemon's alert engine from config: built-in
+// rules merged with config overrides, and one notifier per configured
+// channel. A config error (unknown rule name, bad condition) is logged and
+// falls back to the built-in rules so the daemon keeps running; config
+// validation is the strict path.
+func newAlertEngine(cfg *config.Config, store storage.MetricsStore) *alerts.Engine {
+	rules, err := alerts.MergeRules(alerts.BuiltinRules(), cfg.Alerts)
+	if err != nil {
+		slog.Error("alert rules", "err", err)
+		rules = alerts.BuiltinRules()
+	}
+	engine := alerts.New(rules, store)
+	if notifiers := notifiersFromChannels(cfg.Alerts); len(notifiers) > 0 {
+		engine.SetNotifiers(notifiers)
+	}
+	return engine
+}
+
+// notifiersFromChannels builds one notifier per configured alert channel
+// across all rules, deduplicated by target. Secret indirection through env
+// vars (webhook_env / password_env style fields) is resolved by the notifier
+// constructors at build time.
+func notifiersFromChannels(rules []config.AlertRule) []alerts.Notifier {
+	var out []alerts.Notifier
+	seen := make(map[string]bool)
+	for _, r := range rules {
+		for _, ch := range r.Notify {
+			key := ch.Type + "\x00" + ch.Webhook + "\x00" + ch.Channel + "\x00" + ch.To
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			switch ch.Type {
+			case "slack":
+				out = append(out, notify.NewSlack(ch.Webhook))
+			case "pagerduty":
+				out = append(out, notify.NewPagerDuty(ch.Webhook, ""))
+			case "email":
+				out = append(out, notify.NewEmail(notify.SMTPConfig{To: splitRecipients(ch.To)}))
+			}
+		}
+	}
+	return out
+}
+
+// splitRecipients splits a comma-separated recipient list, trimming blanks.
+func splitRecipients(s string) []string {
+	var out []string
+	for _, r := range strings.Split(s, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Run blocks until ctx is canceled (or Shutdown is called), then waits for
@@ -147,5 +217,7 @@ func (d *Daemon) startLoops(ctx context.Context) {
 	d.goLoop(func() { runScrapeLoop(ctx, d, time.NewTicker(interval).C) })
 	d.goLoop(func() { runRollupLoop(ctx, d, cron.New()) })
 
-	// TODO(5E): alert loop.
+	if d.alerts != nil && d.stats != nil {
+		d.goLoop(func() { runAlertLoop(ctx, d, d.alerts, d.latest, d.stats.AlertFiring) })
+	}
 }

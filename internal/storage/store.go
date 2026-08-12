@@ -101,6 +101,12 @@ type MetricsStore interface {
 	Close() error
 }
 
+// ValidTypes returns the storage backend types NewStore supports, in the
+// canonical order used by validation and error messages.
+func ValidTypes() []string {
+	return []string{"sqlite", "postgres", "clickhouse"}
+}
+
 // NewStore creates a MetricsStore based on configuration type.
 func NewStore(storeType, dsn string) (MetricsStore, error) {
 	switch storeType {
