@@ -117,7 +117,8 @@ streampulse serve --brokers localhost:9093   # Connect StreamPulse
 
 ```
 v0.1 (DONE):  TUI + daemon + 6 alerts + DLQ module + Analytics L1 + config + auth
-v0.2 (Weeks 4-6):  REST API + local web dashboard + PostgreSQL + Analytics L2
+v0.1.5 (DONE): Analytics L2 — anomaly detection, rebalance history, throughput patterns
+v0.2 (Weeks 4-6):  REST API + local web dashboard + PostgreSQL
 v0.3 (Weeks 7-10): Kafka Connect + Streaming (Flink/Streams) + PulseDev Cloud
 ```
 

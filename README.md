@@ -54,9 +54,19 @@ Local dev Kafka: `docker compose up -d` (KRaft Kafka 3.9 + producer/consumer).
 
 - REST API on daemon (`:9090/api`)
 - PostgreSQL backend
-- Z-score anomaly detection + seasonal baselines
 - Embedded local web dashboard
 - Kafka Connect module
+
+*(Analytics L2 — anomaly detection, rebalance history, throughput patterns — is implemented; see below.)*
+
+### Analytics L2 (Implemented)
+
+| Feature | Description |
+|---------|-------------|
+| 🔎 **Anomaly Detection** | Seasonal hour-of-week baselines + rolling Z-score on lag/msg-rate/bytes-rate; `analyze --anomalies` |
+| 🔁 **Rebalance History** | Per-group per-day rebalance counts from persisted group-state samples; `analyze --rebalances` |
+| 📊 **Throughput Patterns** | Hour-of-day/day-of-week profiles, peak hour/day, linear trend forecast; `analyze --patterns` |
+| 🖥️ **TUI Panes** | Anomaly list, rebalance table, and selected-topic pattern bars on the Analytics tab |
 
 ### v0.3 (Planned)
 
