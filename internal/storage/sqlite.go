@@ -440,6 +440,54 @@ func (s *SQLiteStore) Purge(ctx context.Context, retention Retention) error {
 	return nil
 }
 
+// QueryAlertState returns the persisted alert states for all rules, ordered
+// by rule name. A rule that never fired has a zero LastFired.
+func (s *SQLiteStore) QueryAlertState(ctx context.Context) ([]AlertStateRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rule_name, status, last_fired, last_value, notify_count
+		FROM alert_state
+		ORDER BY rule_name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query alert_state: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AlertStateRow
+	for rows.Next() {
+		var r AlertStateRow
+		var lastFired *int64
+		if err := rows.Scan(&r.RuleName, &r.Status, &lastFired, &r.LastValue, &r.NotifyCount); err != nil {
+			return nil, fmt.Errorf("scan alert_state: %w", err)
+		}
+		if lastFired != nil {
+			r.LastFired = time.UnixMilli(*lastFired).UTC()
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SaveAlertState upserts one rule's alert state.
+func (s *SQLiteStore) SaveAlertState(ctx context.Context, row AlertStateRow) error {
+	var lastFired any
+	if !row.LastFired.IsZero() {
+		lastFired = row.LastFired.UnixMilli()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO alert_state (rule_name, status, last_fired, last_value, notify_count)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(rule_name) DO UPDATE SET
+			status = excluded.status,
+			last_fired = excluded.last_fired,
+			last_value = excluded.last_value,
+			notify_count = excluded.notify_count
+	`, row.RuleName, row.Status, lastFired, row.LastValue, row.NotifyCount); err != nil {
+		return fmt.Errorf("save alert_state %s: %w", row.RuleName, err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }

@@ -56,6 +56,15 @@ type Retention struct {
 	Daily  time.Duration
 }
 
+// AlertStateRow is one persisted alert rule state.
+type AlertStateRow struct {
+	RuleName    string    `json:"rule_name"`
+	Status      string    `json:"status"` // "ok" | "pending" | "firing"
+	LastFired   time.Time `json:"last_fired,omitempty"`
+	LastValue   float64   `json:"last_value"`
+	NotifyCount int       `json:"notify_count"`
+}
+
 // ─── Interface ─────────────────────────────────────────────────────────────
 
 // MetricsStore is the pluggable storage backend for metrics and analytics.
@@ -71,6 +80,13 @@ type MetricsStore interface {
 
 	// Rollup aggregates raw → hourly and hourly → daily.
 	Rollup(ctx context.Context, resolution string) error
+
+	// QueryAlertState returns the persisted alert states for all rules,
+	// ordered by rule name.
+	QueryAlertState(ctx context.Context) ([]AlertStateRow, error)
+
+	// SaveAlertState upserts one rule's alert state.
+	SaveAlertState(ctx context.Context, row AlertStateRow) error
 
 	// Purge removes expired data according to retention policy.
 	Purge(ctx context.Context, retention Retention) error
