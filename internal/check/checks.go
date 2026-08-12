@@ -6,6 +6,8 @@ package check
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,6 +92,17 @@ func RunAll(ctx context.Context, env Env) []Result {
 	for _, topic := range env.Flags.Topics {
 		checks = append(checks, checkTopic(topic))
 	}
+	for _, group := range env.Flags.Groups {
+		checks = append(checks, checkGroup(group))
+	}
+	if env.Flags.MinRetentionHours > 0 {
+		for _, topic := range env.Flags.Topics {
+			checks = append(checks, checkRetention(topic, env.Flags.MinRetentionHours))
+		}
+	}
+	if env.Flags.CheckReplication {
+		checks = append(checks, Check{Name: "replication", Run: runReplication})
+	}
 
 	results := make([]Result, 0, len(checks))
 	connected := true
@@ -172,4 +185,120 @@ func checkTopic(topic string) Check {
 			}, nil
 		},
 	}
+}
+
+// checkGroup builds the health check for one consumer group: it must exist,
+// be Stable, have active members, and its total lag must not exceed the
+// configured maximum.
+func checkGroup(group string) Check {
+	return Check{
+		Name: "group " + group,
+		Run: func(ctx context.Context, env Env) (Result, error) {
+			groups, err := env.Client.ListConsumerGroups(ctx)
+			if err != nil {
+				return Result{}, fmt.Errorf("list consumer groups: %w", err)
+			}
+			var info *kafka.GroupInfo
+			for i := range groups {
+				if groups[i].Name == group {
+					info = &groups[i]
+					break
+				}
+			}
+			if info == nil {
+				return Result{Status: StatusFail, Message: "group not found"}, nil
+			}
+
+			var problems []string
+			if info.State != "Stable" {
+				problems = append(problems, fmt.Sprintf("state %s, want Stable", info.State))
+			}
+			if info.Members == 0 {
+				problems = append(problems, "no members")
+			}
+
+			lag, err := env.Client.GroupLag(ctx)
+			if err != nil {
+				return Result{}, fmt.Errorf("group lag: %w", err)
+			}
+			var total int64
+			for _, l := range lag[group] {
+				total += l
+			}
+			maxLag := env.Flags.MaxLag
+			if maxLag < 1 {
+				maxLag = DefaultMaxLag
+			}
+			if total > maxLag {
+				problems = append(problems, fmt.Sprintf("lag %d, max %d", total, maxLag))
+			}
+			if len(problems) > 0 {
+				return Result{Status: StatusFail, Message: strings.Join(problems, "; "), Value: float64(total)}, nil
+			}
+			return Result{Status: StatusPass, Message: fmt.Sprintf("state Stable, lag %d", total), Value: float64(total)}, nil
+		},
+	}
+}
+
+// topicConfigsClient is the optional client capability for reading topic
+// configuration, satisfied by the kafka client once topic config support
+// lands.
+type topicConfigsClient interface {
+	DescribeConfigs(ctx context.Context, topic string) (map[string]string, error)
+}
+
+// checkRetention builds the health check for one topic's retention: its
+// retention.ms must be at least the requested minimum, unless retention is
+// unlimited (negative value), which satisfies any threshold.
+func checkRetention(topic string, minHours float64) Check {
+	return Check{
+		Name: "retention " + topic,
+		Run: func(ctx context.Context, env Env) (Result, error) {
+			dc, ok := env.Client.(topicConfigsClient)
+			if !ok {
+				return Result{}, fmt.Errorf("client does not support DescribeConfigs")
+			}
+			configs, err := dc.DescribeConfigs(ctx, topic)
+			if err != nil {
+				return Result{}, fmt.Errorf("describe configs: %w", err)
+			}
+			raw, ok := configs["retention.ms"]
+			if !ok {
+				return Result{}, fmt.Errorf("retention.ms missing from config response")
+			}
+			ms, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return Result{}, fmt.Errorf("retention.ms %q: %w", raw, err)
+			}
+			if ms < 0 {
+				return Result{Status: StatusPass, Message: "retention unlimited", Value: math.MaxFloat64}, nil
+			}
+			hours := float64(ms) / hoursToMS
+			if hours < minHours {
+				return Result{Status: StatusFail, Message: fmt.Sprintf("retention %.1fh, min %.1fh", hours, minHours), Value: hours}, nil
+			}
+			return Result{Status: StatusPass, Message: fmt.Sprintf("retention %.1fh, min %.1fh", hours, minHours), Value: hours}, nil
+		},
+	}
+}
+
+const hoursToMS = float64(1000 * 60 * 60)
+
+// runReplication verifies no broker hosts more partition replicas than it
+// leads, which would indicate under-replicated partitions.
+func runReplication(ctx context.Context, env Env) (Result, error) {
+	cluster, err := env.Client.DescribeCluster(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("describe cluster: %w", err)
+	}
+	var problems []string
+	for _, b := range cluster.Brokers {
+		if b.ReplicaPartitions > b.LeaderPartitions {
+			problems = append(problems, fmt.Sprintf("broker %d (replicas %d, leaders %d)", b.ID, b.ReplicaPartitions, b.LeaderPartitions))
+		}
+	}
+	if len(problems) > 0 {
+		return Result{Status: StatusFail, Message: strings.Join(problems, "; "), Value: float64(len(problems))}, nil
+	}
+	return Result{Status: StatusPass, Message: "all brokers lead the partitions they host"}, nil
 }
