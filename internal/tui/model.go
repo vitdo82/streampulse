@@ -257,8 +257,31 @@ func (m *Model) loadData() DataUpdated {
 	data.Brokers = brokerRowsFromStore(latest)
 	data.Topics = topicRowsFromStore(latest)
 	data.ConsumerGroups = groupRowsFromStore(latest)
+
+	state, err := m.store.QueryAlertState(ctx)
+	if err != nil {
+		logf("alerts: %v", err)
+	} else {
+		data.Alerts = alertRowsFromStore(state)
+	}
 	data.Logs = logs
 	return data
+}
+
+// alertRowsFromStore maps persisted alert states into dashboard rows. The
+// rule severity is not part of the persisted state, so it renders as "-".
+func alertRowsFromStore(state []storage.AlertStateRow) []AlertRow {
+	rows := make([]AlertRow, 0, len(state))
+	for _, s := range state {
+		row := AlertRow{Name: s.RuleName, Severity: "-", Value: fmt.Sprintf("%.1f", s.LastValue)}
+		if !s.LastFired.IsZero() {
+			row.FiredAt = s.LastFired.Format("15:04:05")
+		} else {
+			row.FiredAt = "-"
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // brokerRowsFromStore maps latest broker metrics into dashboard rows.

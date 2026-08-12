@@ -248,6 +248,40 @@ func TestLoadDataReadsPersistedMetrics(t *testing.T) {
 	assert.False(t, data.Failed)
 }
 
+func TestLoadDataReadsPersistedAlertState(t *testing.T) {
+	store, err := storage.NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer store.Close()
+
+	fired := time.Now().Add(-2 * time.Minute)
+	require.NoError(t, store.SaveAlertState(context.Background(), storage.AlertStateRow{
+		RuleName: "growth_rate >= 10.5", Status: "ok", LastValue: 2,
+	}))
+	require.NoError(t, store.SaveAlertState(context.Background(), storage.AlertStateRow{
+		RuleName: "lag > 1000", Status: "firing", LastFired: fired, LastValue: 2500, NotifyCount: 3,
+	}))
+
+	m := NewModelWithStore(store)
+	data := m.loadData()
+
+	// QueryAlertState orders by rule name: growth_rate before lag.
+	require.Len(t, data.Alerts, 2)
+	g := data.Alerts[0]
+	assert.Equal(t, "growth_rate >= 10.5", g.Name)
+	assert.Equal(t, "-", g.Severity)
+	assert.Equal(t, "2.0", g.Value)
+	assert.Equal(t, "-", g.FiredAt)
+
+	l := data.Alerts[1]
+	assert.Equal(t, "lag > 1000", l.Name)
+	assert.Equal(t, "-", l.Severity)
+	assert.Equal(t, "2500.0", l.Value)
+	// QueryAlertState normalizes last_fired to UTC.
+	assert.Equal(t, fired.UTC().Format("15:04:05"), l.FiredAt)
+
+	assert.False(t, data.Failed)
+}
+
 func TestLoadDataStoreOffline(t *testing.T) {
 	store, err := storage.NewSQLiteStore(":memory:")
 	require.NoError(t, err)
