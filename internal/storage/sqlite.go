@@ -105,15 +105,102 @@ func (s *SQLiteStore) WriteBatch(ctx context.Context, metrics []Metric) error {
 }
 
 func (s *SQLiteStore) QueryRaw(ctx context.Context, params QueryParams) ([]MetricRow, error) {
-	return nil, nil // TODO: implement
+	return s.query(ctx, "raw_metrics", "ts", params)
 }
 
 func (s *SQLiteStore) QueryHourly(ctx context.Context, params QueryParams) ([]MetricRow, error) {
-	return nil, nil // TODO: implement
+	return s.query(ctx, "hourly_metrics", "bucket", params)
 }
 
 func (s *SQLiteStore) QueryDaily(ctx context.Context, params QueryParams) ([]MetricRow, error) {
-	return nil, nil // TODO: implement
+	return s.query(ctx, "daily_metrics", "bucket", params)
+}
+
+// query runs a filtered, ordered, limited SELECT over one metrics table.
+// Raw rows are grouped by (ts, identity, tags) into one MetricRow per point;
+// hourly/daily rows map their aggregate columns directly. A window with
+// From >= To naturally matches nothing and is not an error.
+func (s *SQLiteStore) query(ctx context.Context, table, tsCol string, params QueryParams) ([]MetricRow, error) {
+	var clauses []string
+	var args []any
+	add := func(clause string, arg any) {
+		clauses = append(clauses, clause)
+		args = append(args, arg)
+	}
+	if params.ClusterID != "" {
+		add("cluster_id = ?", params.ClusterID)
+	}
+	if params.Metric != "" {
+		add("metric = ?", params.Metric)
+	}
+	if params.EntityType != "" {
+		add("entity_type = ?", params.EntityType)
+	}
+	if params.EntityName != "" {
+		add("entity_name = ?", params.EntityName)
+	}
+	if !params.From.IsZero() {
+		add(tsCol+" >= ?", params.From.UnixMilli())
+	}
+	if !params.To.IsZero() {
+		add(tsCol+" < ?", params.To.UnixMilli())
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	selectCols := tsCol + ", cluster_id, metric, entity_type, entity_name, tags"
+	groupBy := ""
+	if table == "raw_metrics" {
+		selectCols += ", AVG(value), MIN(value), MAX(value), COUNT(*), SUM(value)"
+		groupBy = " GROUP BY " + tsCol + ", cluster_id, metric, entity_type, entity_name, tags"
+	} else {
+		selectCols += ", avg, min, max, p50, p95, p99, count, sum"
+	}
+
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+selectCols+" FROM "+table+where+groupBy+" ORDER BY "+tsCol+" LIMIT ?", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MetricRow
+	for rows.Next() {
+		var r MetricRow
+		var ts int64
+		var tags string
+		if table == "raw_metrics" {
+			if err := rows.Scan(&ts, &r.ClusterID, &r.Metric, &r.EntityType, &r.EntityName, &tags,
+				&r.Avg, &r.Min, &r.Max, &r.Count, &r.Sum); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := rows.Scan(&ts, &r.ClusterID, &r.Metric, &r.EntityType, &r.EntityName, &tags,
+				&r.Avg, &r.Min, &r.Max, &r.P50, &r.P95, &r.P99, &r.Count, &r.Sum); err != nil {
+				return nil, err
+			}
+		}
+		r.TimeStart = time.UnixMilli(ts).UTC()
+		if len(tags) > 0 {
+			if err := json.Unmarshal([]byte(tags), &r.Tags); err != nil {
+				return nil, fmt.Errorf("parse tags for %s at %d: %w", r.Metric, ts, err)
+			}
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) Rollup(ctx context.Context, resolution string) error {

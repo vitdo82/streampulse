@@ -213,3 +213,173 @@ func TestRollupEmptyStore(t *testing.T) {
 	assert.Empty(t, aggregateRows(t, s, "hourly_metrics"))
 	assert.Empty(t, aggregateRows(t, s, "daily_metrics"))
 }
+
+func TestQueryRawFilters(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.WriteBatch(context.Background(), []Metric{
+		{TS: base, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 10},
+		{TS: base, ClusterID: "c2", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 20},
+		{TS: base, ClusterID: "c1", Metric: "lag", EntityType: "consumer_group", EntityName: "orders-processor", Value: 30},
+	}))
+
+	rows, err := s.QueryRaw(context.Background(), QueryParams{ClusterID: "c1"})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{ClusterID: "c1", Metric: "msg_rate"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "topic", rows[0].EntityType)
+	assert.Equal(t, "orders", rows[0].EntityName)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{Metric: "lag", EntityType: "consumer_group"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "orders-processor", rows[0].EntityName)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{EntityName: "orders"})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{Metric: "nonexistent"})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
+func TestQueryRawTimeWindow(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	for i, v := range []float64{1, 2, 3} {
+		seedMetric(t, s, base.Add(time.Duration(i)*5*time.Second), v)
+	}
+
+	rows, err := s.QueryRaw(context.Background(), QueryParams{From: base, To: base.Add(10 * time.Second)})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, base, rows[0].TimeStart)
+	assert.Equal(t, base.Add(5*time.Second), rows[1].TimeStart)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{From: base.Add(5 * time.Second)})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+}
+
+func TestQueryRawLimit(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	metrics := make([]Metric, 10001)
+	for i := range metrics {
+		metrics[i] = Metric{
+			TS: base.Add(time.Duration(i) * time.Millisecond), ClusterID: "c1",
+			Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: float64(i),
+		}
+	}
+	require.NoError(t, s.WriteBatch(context.Background(), metrics))
+
+	rows, err := s.QueryRaw(context.Background(), QueryParams{})
+	require.NoError(t, err)
+	assert.Len(t, rows, 1000, "default limit is 1000")
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{Limit: 5})
+	require.NoError(t, err)
+	assert.Len(t, rows, 5)
+
+	rows, err = s.QueryRaw(context.Background(), QueryParams{Limit: 20000})
+	require.NoError(t, err)
+	assert.Len(t, rows, 10000, "limit is clamped to 10000")
+}
+
+func TestQueryRawRowShape(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.WriteBatch(context.Background(), []Metric{
+		{TS: base, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Tags: map[string]string{"a": "b"}, Value: 12.5},
+	}))
+
+	rows, err := s.QueryRaw(context.Background(), QueryParams{})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, base, rows[0].TimeStart)
+	assert.Equal(t, map[string]string{"a": "b"}, rows[0].Tags)
+	assert.Equal(t, 12.5, rows[0].Avg)
+	assert.Equal(t, 12.5, rows[0].Min)
+	assert.Equal(t, 12.5, rows[0].Max)
+	assert.Equal(t, 12.5, rows[0].Sum)
+	assert.Equal(t, int64(1), rows[0].Count)
+	assert.Equal(t, 0.0, rows[0].P50)
+	assert.Equal(t, 0.0, rows[0].P95)
+	assert.Equal(t, 0.0, rows[0].P99)
+}
+
+func TestQueryHourlyDaily(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	for i, v := range []float64{10, 20, 30} {
+		seedMetric(t, s, base.Add(time.Duration(i)*15*time.Minute), v)
+	}
+	for i, v := range []float64{40, 50, 60} {
+		seedMetric(t, s, base.Add(time.Hour+time.Duration(i)*15*time.Minute), v)
+	}
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+	require.NoError(t, s.Rollup(context.Background(), "daily"))
+
+	rows, err := s.QueryHourly(context.Background(), QueryParams{Metric: "msg_rate"})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, base, rows[0].TimeStart)
+	assert.Equal(t, 20.0, rows[0].Avg)
+	assert.Equal(t, 10.0, rows[0].Min)
+	assert.Equal(t, 30.0, rows[0].Max)
+	assert.Equal(t, 20.0, rows[0].P50)
+	assert.Equal(t, 30.0, rows[0].P95)
+	assert.Equal(t, 30.0, rows[0].P99)
+	assert.Equal(t, int64(3), rows[0].Count)
+	assert.Equal(t, 60.0, rows[0].Sum)
+
+	rows, err = s.QueryDaily(context.Background(), QueryParams{})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, base.Truncate(24*time.Hour), rows[0].TimeStart)
+	assert.Equal(t, 35.0, rows[0].Avg)
+	assert.Equal(t, 6, int(rows[0].Count))
+	assert.Equal(t, 210.0, rows[0].Sum)
+}
+
+func TestQueryFromAfterTo(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	base := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	for i, v := range []float64{1, 2, 3} {
+		seedMetric(t, s, base.Add(time.Duration(i)*time.Hour), v)
+	}
+	require.NoError(t, s.Rollup(context.Background(), "hourly"))
+
+	params := QueryParams{From: base.Add(24 * time.Hour), To: base}
+	rows, err := s.QueryRaw(context.Background(), params)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	rows, err = s.QueryHourly(context.Background(), params)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	rows, err = s.QueryDaily(context.Background(), params)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
