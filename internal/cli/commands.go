@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/daemon"
@@ -150,7 +155,8 @@ func newAnalyzeCommand() *cobra.Command {
 }
 
 func newAlertsCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "alerts",
 		Short: "View current alert status",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -158,8 +164,43 @@ func newAlertsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_ = cfg // TODO: show alerts (Phase 5)
+
+			store, err := storage.NewStore(cfg.Storage.Type, cfg.Storage.SQLite.Path)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			rows, err := store.QueryAlertState(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("query alert state: %w", err)
+			}
+			if len(rows) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no alerts")
+				return nil
+			}
+			if jsonOut {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(rows)
+			}
+			printAlertTable(cmd.OutOrStdout(), rows)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output alert state as JSON")
+	return cmd
+}
+
+// printAlertTable renders the persisted alert states as an aligned table
+// (rule, status, last fired, last value, notify count).
+func printAlertTable(w io.Writer, rows []storage.AlertStateRow) {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "RULE\tSTATUS\tLAST FIRED\tVALUE\tNOTIFY COUNT")
+	for _, r := range rows {
+		lastFired := "-"
+		if !r.LastFired.IsZero() {
+			lastFired = r.LastFired.Format(time.RFC3339)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%d\n", r.RuleName, r.Status, lastFired, r.LastValue, r.NotifyCount)
+	}
+	tw.Flush()
 }
