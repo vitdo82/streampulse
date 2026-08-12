@@ -12,15 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeScraper records ScrapeAndStore invocations; a non-nil gate channel
-// holds calls open so tests can simulate an in-flight scrape.
+// fakeScraper records Collect invocations; a non-nil gate channel holds
+// calls open so tests can simulate an in-flight scrape.
 type fakeScraper struct {
 	mu    sync.Mutex
 	calls int
 	gate  chan struct{}
 }
 
-func (f *fakeScraper) ScrapeAndStore(ctx context.Context) error {
+func (f *fakeScraper) Collect(ctx context.Context) ([]storage.Metric, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -30,7 +30,7 @@ func (f *fakeScraper) ScrapeAndStore(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (f *fakeScraper) count() int {

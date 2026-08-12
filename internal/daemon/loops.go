@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -72,11 +73,24 @@ func exponentialBackoff(n int) time.Duration {
 	return time.Second << n
 }
 
-// doScrape performs one scrape cycle and records its outcome in the
-// Prometheus scrape statistics.
+// doScrape performs one scrape cycle: collects the metrics, persists the
+// batch (partial results are written even when a collector fails; empty
+// batches are not written), exposes the stored batch to the alert engine,
+// and records the outcome in the Prometheus scrape statistics.
 func (d *Daemon) doScrape(ctx context.Context) {
 	start := time.Now()
-	err := d.scraper.ScrapeAndStore(ctx)
+	metrics, err := d.scraper.Collect(ctx)
+	if err != nil {
+		err = fmt.Errorf("collect: %w", err)
+	}
+	if len(metrics) > 0 && d.store != nil {
+		if werr := d.store.WriteBatch(ctx, metrics); werr != nil {
+			err = errors.Join(err, fmt.Errorf("write batch: %w", werr))
+		} else if d.latest != nil {
+			batch := metrics
+			d.latest.Store(&batch)
+		}
+	}
 	if d.stats != nil {
 		d.stats.ScrapesTotal.Inc()
 		d.stats.ScrapeDuration.Observe(time.Since(start).Seconds())
