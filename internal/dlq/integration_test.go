@@ -59,6 +59,29 @@ func createScratchTopic(t *testing.T, name string, partitions int) (dlqTopic, or
 	return dlqTopic, origTopic
 }
 
+// createScratchDlqOnly creates a unique DLQ topic without its original,
+// registering cleanup to delete it.
+func createScratchDlqOnly(t *testing.T, name string) string {
+	t.Helper()
+	brokers := requireBroker(t)
+	dlqTopic := fmt.Sprintf("%s-%d.dlq", name, time.Now().UnixNano())
+	conn, err := kafka.DialContext(context.Background(), "tcp", brokers[0])
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.CreateTopics(
+		kafka.TopicConfig{Topic: dlqTopic, NumPartitions: 1, ReplicationFactor: 1},
+	))
+	t.Cleanup(func() {
+		c, err := kafka.Dial("tcp", brokers[0])
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_ = c.DeleteTopics(dlqTopic)
+	})
+	return dlqTopic
+}
+
 // produceToPartition writes messages to a specific partition of a topic.
 func produceToPartition(t *testing.T, brokers []string, topic string, partition int, msgs []kafka.Message) {
 	t.Helper()

@@ -87,9 +87,8 @@ func readTail(ctx context.Context, broker, topic string, partition, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-
 	hw, err := conn.ReadLastOffset()
+	conn.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +100,26 @@ func readTail(ctx context.Context, broker, topic string, partition, limit int) (
 	if start < 0 {
 		start = 0
 	}
+	raw, err := readRange(ctx, broker, topic, partition, start, hw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Message, len(raw))
+	for i, m := range raw {
+		out[i] = toMessage(topic, m)
+	}
+	return out, nil
+}
+
+// readRange reads the messages of one partition in the offset range
+// [start, end), oldest-first.
+func readRange(ctx context.Context, broker, topic string, partition int, start, end int64) ([]kafka.Message, error) {
+	conn, err := kafka.DefaultDialer.DialLeader(ctx, "tcp", broker, topic, partition)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
 	if _, err := conn.Seek(start, kafka.SeekAbsolute); err != nil {
 		return nil, err
 	}
@@ -108,8 +127,8 @@ func readTail(ctx context.Context, broker, topic string, partition, limit int) (
 	batch := conn.ReadBatchWith(kafka.ReadBatchConfig{MinBytes: 1, MaxBytes: 10e6})
 	defer batch.Close()
 
-	msgs := make([]Message, 0, hw-start)
-	for i := start; i < hw; i++ {
+	msgs := make([]kafka.Message, 0, end-start)
+	for i := start; i < end; i++ {
 		m, err := batch.ReadMessage()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -117,7 +136,7 @@ func readTail(ctx context.Context, broker, topic string, partition, limit int) (
 			}
 			return nil, err
 		}
-		msgs = append(msgs, toMessage(topic, m))
+		msgs = append(msgs, m)
 	}
 	return msgs, nil
 }
