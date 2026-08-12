@@ -45,3 +45,80 @@ func brokerName(b kafka.BrokerInfo) string {
 	}
 	return net.JoinHostPort(b.Host, strconv.Itoa(b.Port))
 }
+
+const (
+	// avgMessageSize is the assumed mean payload size in bytes used to derive
+	// bytes_rate from message counts (v0.1 has no broker-side byte counters).
+	avgMessageSize = 100
+)
+
+// topicSnapshot is the per-topic state carried between collect cycles.
+type topicSnapshot struct {
+	messages int64
+	bytes    int64
+	ts       time.Time
+}
+
+// topicCollector emits per-topic partition counts, cumulative message counts,
+// and per-second message and byte rates. Rates are computed against the
+// previous cycle's snapshot and reset after a gap larger than two intervals so
+// missed cycles never produce a bogus spike.
+type topicCollector struct {
+	client    Client
+	clusterID string
+	interval  time.Duration
+	prev      map[string]topicSnapshot
+}
+
+func newTopicCollector(client Client, clusterID string, interval time.Duration) *topicCollector {
+	return &topicCollector{client: client, clusterID: clusterID, interval: interval}
+}
+
+func (t *topicCollector) Collect(ctx context.Context, now time.Time) ([]storage.Metric, error) {
+	topics, err := t.client.ListTopics(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list topics: %w", err)
+	}
+	offsets, err := t.client.TopicOffsets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("topic offsets: %w", err)
+	}
+
+	snap := make(map[string]topicSnapshot, len(topics))
+	metrics := make([]storage.Metric, 0, len(topics)*4)
+	for _, topic := range topics {
+		messages := int64(0)
+		if parts := offsets[topic.Name]; parts != nil {
+			for _, off := range parts {
+				if off > 0 {
+					messages += off
+				}
+			}
+		}
+		metrics = append(metrics,
+			storage.Metric{TS: now, ClusterID: t.clusterID, Metric: MetricTopicPartitionCount, EntityType: "topic", EntityName: topic.Name, Value: float64(topic.Partitions)},
+			storage.Metric{TS: now, ClusterID: t.clusterID, Metric: MetricTopicMessages, EntityType: "topic", EntityName: topic.Name, Value: float64(messages)},
+		)
+		snap[topic.Name] = topicSnapshot{messages: messages, bytes: messages * avgMessageSize, ts: now}
+	}
+
+	for name, prev := range t.prev {
+		cur, ok := snap[name]
+		if !ok {
+			continue
+		}
+		msgRate, byteRate := 0.0, 0.0
+		if dt := cur.ts.Sub(prev.ts); dt > 0 && dt <= 2*t.interval {
+			if delta := cur.messages - prev.messages; delta > 0 {
+				msgRate = float64(delta) / dt.Seconds()
+				byteRate = float64(cur.bytes-prev.bytes) / dt.Seconds()
+			}
+		}
+		metrics = append(metrics,
+			storage.Metric{TS: now, ClusterID: t.clusterID, Metric: MetricTopicMsgRate, EntityType: "topic", EntityName: name, Value: msgRate},
+			storage.Metric{TS: now, ClusterID: t.clusterID, Metric: MetricTopicBytesRate, EntityType: "topic", EntityName: name, Value: byteRate},
+		)
+	}
+	t.prev = snap
+	return metrics, nil
+}

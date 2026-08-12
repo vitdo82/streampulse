@@ -37,6 +37,10 @@ func (f *fakeClient) ListConsumerGroups(ctx context.Context) ([]kafka.GroupInfo,
 	return f.groups, f.err
 }
 
+func (f *fakeClient) TopicOffsets(ctx context.Context) (map[string]map[int]int64, error) {
+	return f.offsets, f.err
+}
+
 type fakeCollector struct {
 	metrics []storage.Metric
 	err     error
@@ -172,4 +176,101 @@ func TestScraperCollect(t *testing.T) {
 	for _, m := range metrics {
 		assert.Equal(t, testClusterID, m.ClusterID)
 	}
+}
+
+// topicMetricsIndexes maps a metric name to the slice of values collected for
+// it, for the topic collector.
+func topicMetricsIndexes(metrics []storage.Metric, name string) map[string]float64 {
+	out := make(map[string]float64)
+	for _, m := range metrics {
+		if m.Metric == name {
+			out[m.EntityName] = m.Value
+		}
+	}
+	return out
+}
+
+func TestTopicCollectorFirstCollectNoRates(t *testing.T) {
+	client := &fakeClient{
+		topics:  []kafka.TopicInfo{{Name: "orders", Partitions: 3}},
+		offsets: map[string]map[int]int64{"orders": {0: 100, 1: 100, 2: 100}},
+	}
+	c := newTopicCollector(client, testClusterID, 5*time.Second)
+
+	metrics, err := c.Collect(context.Background(), time.Now())
+	require.NoError(t, err)
+
+	partitionCount := topicMetricsIndexes(metrics, MetricTopicPartitionCount)
+	messages := topicMetricsIndexes(metrics, MetricTopicMessages)
+	assert.Equal(t, 3.0, partitionCount["orders"])
+	assert.Equal(t, 300.0, messages["orders"])
+	assert.NotContains(t, topicMetricsIndexes(metrics, MetricTopicMsgRate), "orders")
+	assert.NotContains(t, topicMetricsIndexes(metrics, MetricTopicBytesRate), "orders")
+}
+
+func TestTopicCollectorRates(t *testing.T) {
+	client := &fakeClient{
+		topics:  []kafka.TopicInfo{{Name: "orders", Partitions: 3}, {Name: "payments", Partitions: 2}},
+		offsets: map[string]map[int]int64{"orders": {0: 100, 1: 100, 2: 100}, "payments": {0: 50, 1: 50}},
+	}
+	c := newTopicCollector(client, testClusterID, 5*time.Second)
+	t0 := time.Now()
+
+	_, err := c.Collect(context.Background(), t0)
+	require.NoError(t, err)
+
+	client.offsets = map[string]map[int]int64{"orders": {0: 200, 1: 100, 2: 100}, "payments": {0: 60, 1: 50}}
+	metrics, err := c.Collect(context.Background(), t0.Add(5*time.Second))
+	require.NoError(t, err)
+
+	// orders grew by 100 messages in 5s -> 20 msgs/s; payments by 10 -> 2/s.
+	rate := topicMetricsIndexes(metrics, MetricTopicMsgRate)
+	bytesRate := topicMetricsIndexes(metrics, MetricTopicBytesRate)
+	assert.InDelta(t, 20.0, rate["orders"], 0.001)
+	assert.InDelta(t, 2.0, rate["payments"], 0.001)
+	// bytes_rate assumes a 100-byte average message.
+	assert.InDelta(t, 2000.0, bytesRate["orders"], 0.001)
+	assert.InDelta(t, 200.0, bytesRate["payments"], 0.001)
+
+	// Cumulative messages reflect the new high-watermarks.
+	messages := topicMetricsIndexes(metrics, MetricTopicMessages)
+	assert.Equal(t, 400.0, messages["orders"])
+	assert.Equal(t, 110.0, messages["payments"])
+}
+
+func TestTopicCollectorGapResetsRate(t *testing.T) {
+	client := &fakeClient{
+		topics:  []kafka.TopicInfo{{Name: "orders", Partitions: 1}},
+		offsets: map[string]map[int]int64{"orders": {0: 100}},
+	}
+	c := newTopicCollector(client, testClusterID, 5*time.Second)
+	t0 := time.Now()
+
+	_, err := c.Collect(context.Background(), t0)
+	require.NoError(t, err)
+	_, err = c.Collect(context.Background(), t0.Add(5*time.Second))
+	require.NoError(t, err)
+
+	// 3 intervals later the delta must not spike: rate resets to 0.
+	client.offsets = map[string]map[int]int64{"orders": {0: 10000}}
+	metrics, err := c.Collect(context.Background(), t0.Add(20*time.Second))
+	require.NoError(t, err)
+	rate := topicMetricsIndexes(metrics, MetricTopicMsgRate)
+	assert.InDelta(t, 0.0, rate["orders"], 0.001)
+
+	// A normal interval after the gap computes a sane rate from the reset point.
+	client.offsets = map[string]map[int]int64{"orders": {0: 10050}}
+	metrics, err = c.Collect(context.Background(), t0.Add(25*time.Second))
+	require.NoError(t, err)
+	rate = topicMetricsIndexes(metrics, MetricTopicMsgRate)
+	assert.InDelta(t, 10.0, rate["orders"], 0.001)
+}
+
+func TestTopicCollectorError(t *testing.T) {
+	client := &fakeClient{err: errors.New("broker down")}
+	c := newTopicCollector(client, testClusterID, 5*time.Second)
+
+	_, err := c.Collect(context.Background(), time.Now())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broker down")
 }

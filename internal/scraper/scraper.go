@@ -21,6 +21,7 @@ type Client interface {
 	DescribeCluster(ctx context.Context) (*kafka.ClusterInfo, error)
 	ListTopics(ctx context.Context) ([]kafka.TopicInfo, error)
 	ListConsumerGroups(ctx context.Context) ([]kafka.GroupInfo, error)
+	TopicOffsets(ctx context.Context) (map[string]map[int]int64, error)
 }
 
 // Compile-time check that the concrete kafka client satisfies the interface.
