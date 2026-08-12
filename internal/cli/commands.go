@@ -16,7 +16,24 @@ import (
 func runTUI(cfg *config.Config) error {
 	var client *kafka.Client
 	if len(cfg.Brokers) > 0 {
-		client = kafka.NewClient(cfg.Brokers)
+		c, err := kafka.NewClientWithOptions(cfg.Brokers, kafka.Options{
+			TLS: kafka.TLSOptions{
+				Enabled:            cfg.Kafka.TLS.Enabled,
+				CAFile:             cfg.Kafka.TLS.CAFile,
+				CertFile:           cfg.Kafka.TLS.CertFile,
+				KeyFile:            cfg.Kafka.TLS.KeyFile,
+				InsecureSkipVerify: cfg.Kafka.TLS.InsecureSkipVerify,
+			},
+			SASL: kafka.SASLOptions{
+				Mechanism:   cfg.Kafka.SASL.Mechanism,
+				Username:    cfg.Kafka.SASL.Username,
+				PasswordEnv: cfg.Kafka.SASL.PasswordEnv,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		client = c
 		defer client.Close()
 	}
 	return tui.Run(client)
