@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,14 @@ func NewSQLiteStore(dsn string) (*SQLiteStore, error) {
 }
 
 func (s *SQLiteStore) WriteBatch(ctx context.Context, metrics []Metric) error {
+	// Reject non-finite values up front: NaN/Inf would corrupt aggregate
+	// computations (percentiles, avg, min/max) downstream.
+	for _, m := range metrics {
+		if math.IsNaN(m.Value) || math.IsInf(m.Value, 0) {
+			return fmt.Errorf("non-finite value %v for %s/%s", m.Value, m.EntityType, m.EntityName)
+		}
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

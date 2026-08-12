@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -429,4 +430,30 @@ func TestPurgeZeroRetentionIsNoop(t *testing.T) {
 		require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
 		assert.Equal(t, 1, count, "no retention deletes nothing in %s", table)
 	}
+}
+
+func TestWriteBatchRejectsNonFinite(t *testing.T) {
+	s, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ts := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		err := s.WriteBatch(context.Background(), []Metric{
+			{TS: ts, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 1},
+			{TS: ts, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: v},
+		})
+		require.Error(t, err, "value %v must be rejected", v)
+		var count int
+		require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
+		assert.Equal(t, 0, count, "no rows may be written when a value is non-finite")
+	}
+
+	// A valid batch still works afterwards.
+	require.NoError(t, s.WriteBatch(context.Background(), []Metric{
+		{TS: ts, ClusterID: "c1", Metric: "msg_rate", EntityType: "topic", EntityName: "orders", Value: 1},
+	}))
+	var count int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM raw_metrics`).Scan(&count))
+	assert.Equal(t, 1, count)
 }
