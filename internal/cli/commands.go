@@ -6,35 +6,44 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/daemon"
+	"github.com/pulsedev/streampulse/internal/dlq"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/storage"
 	"github.com/pulsedev/streampulse/internal/tui"
 	"github.com/spf13/cobra"
 )
 
+// newKafkaClient builds the kafka client for cfg, applying the TLS and SASL
+// settings from the kafka config section.
+func newKafkaClient(cfg *config.Config) (*kafka.Client, error) {
+	return kafka.NewClientWithOptions(cfg.Brokers, kafka.Options{
+		TLS: kafka.TLSOptions{
+			Enabled:            cfg.Kafka.TLS.Enabled,
+			CAFile:             cfg.Kafka.TLS.CAFile,
+			CertFile:           cfg.Kafka.TLS.CertFile,
+			KeyFile:            cfg.Kafka.TLS.KeyFile,
+			InsecureSkipVerify: cfg.Kafka.TLS.InsecureSkipVerify,
+		},
+		SASL: kafka.SASLOptions{
+			Mechanism:   cfg.Kafka.SASL.Mechanism,
+			Username:    cfg.Kafka.SASL.Username,
+			PasswordEnv: cfg.Kafka.SASL.PasswordEnv,
+		},
+	})
+}
+
 func runTUI(cfg *config.Config) error {
 	var client *kafka.Client
 	if len(cfg.Brokers) > 0 {
-		c, err := kafka.NewClientWithOptions(cfg.Brokers, kafka.Options{
-			TLS: kafka.TLSOptions{
-				Enabled:            cfg.Kafka.TLS.Enabled,
-				CAFile:             cfg.Kafka.TLS.CAFile,
-				CertFile:           cfg.Kafka.TLS.CertFile,
-				KeyFile:            cfg.Kafka.TLS.KeyFile,
-				InsecureSkipVerify: cfg.Kafka.TLS.InsecureSkipVerify,
-			},
-			SASL: kafka.SASLOptions{
-				Mechanism:   cfg.Kafka.SASL.Mechanism,
-				Username:    cfg.Kafka.SASL.Username,
-				PasswordEnv: cfg.Kafka.SASL.PasswordEnv,
-			},
-		})
+		c, err := newKafkaClient(cfg)
 		if err != nil {
 			return err
 		}
@@ -111,31 +120,231 @@ func newDLQCommand() *cobra.Command {
 		Use:   "dlq",
 		Short: "Dead letter queue management",
 	}
+	cmd.AddCommand(newDLQListCommand())
+	cmd.AddCommand(newDLQInspectCommand())
+	cmd.AddCommand(newDLQReplayCommand())
+	return cmd
+}
 
-	cmd.AddCommand(&cobra.Command{
+// dlqTopicView is the JSON shape of a discovered DLQ topic.
+type dlqTopicView struct {
+	Name           string  `json:"name"`
+	OriginalTopic  string  `json:"original_topic"`
+	OriginalExists bool    `json:"original_exists"`
+	MessageCount   int64   `json:"message_count"`
+	GrowthRate     float64 `json:"growth_rate,omitempty"`
+}
+
+func newDLQListCommand() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "Auto-discover DLQ topics",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil // TODO: list DLQ topics (Phase 6)
-		},
-	})
+			cfg, err := CfgFromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			client, err := newKafkaClient(cfg)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
 
-	cmd.AddCommand(&cobra.Command{
+			topics, err := dlq.Discover(cmd.Context(), client, nil)
+			if err != nil {
+				return err
+			}
+			if len(topics) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no DLQ topics found")
+				return nil
+			}
+			if jsonOut {
+				views := make([]dlqTopicView, len(topics))
+				for i, t := range topics {
+					views[i] = dlqTopicView{
+						Name: t.Name, OriginalTopic: t.OriginalTopic,
+						OriginalExists: t.OriginalExists, MessageCount: t.MessageCount,
+						GrowthRate: t.GrowthRate,
+					}
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(views)
+			}
+			printDLQTable(cmd.OutOrStdout(), topics)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	return cmd
+}
+
+// printDLQTable renders the discovered DLQ topics as an aligned table.
+func printDLQTable(w io.Writer, topics []dlq.Topic) {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "TOPIC\tORIGINAL TOPIC\tMESSAGES\tGROWTH")
+	for _, t := range topics {
+		original := t.OriginalTopic
+		if !t.OriginalExists {
+			original += " (missing)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", t.Name, original, t.MessageCount, "-")
+	}
+	tw.Flush()
+}
+
+// dlqMessageView is the JSON shape of one inspected message, with key and
+// value rendered via the dlq display rules (text or hex, truncated).
+type dlqMessageView struct {
+	Topic     string            `json:"topic"`
+	Partition int               `json:"partition"`
+	Offset    int64             `json:"offset"`
+	Timestamp time.Time         `json:"timestamp"`
+	Key       string            `json:"key"`
+	Value     string            `json:"value"`
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+func newDLQInspectCommand() *cobra.Command {
+	var (
+		topic    string
+		limit    int
+		maxBytes int
+		jsonOut  bool
+	)
+	cmd := &cobra.Command{
 		Use:   "inspect",
 		Short: "Inspect messages in a DLQ topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil // TODO: inspect DLQ messages (Phase 6)
+			if topic == "" {
+				return fmt.Errorf("dlq inspect: --topic is required")
+			}
+			cfg, err := CfgFromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			msgs, err := dlq.Inspect(cmd.Context(), cfg.Brokers, topic, limit)
+			if err != nil {
+				return err
+			}
+			if len(msgs) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no messages")
+				return nil
+			}
+			views := make([]dlqMessageView, len(msgs))
+			for i, m := range msgs {
+				views[i] = dlqMessageView{
+					Topic: m.Topic, Partition: m.Partition, Offset: m.Offset, Timestamp: m.Timestamp,
+					Key: dlq.DisplayValue(m.Key, maxBytes), Value: dlq.DisplayValue(m.Value, maxBytes),
+					Headers: m.Headers,
+				}
+			}
+			if jsonOut {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(views)
+			}
+			printDLQMessages(cmd.OutOrStdout(), views)
+			return nil
 		},
-	})
+	}
+	cmd.Flags().StringVar(&topic, "topic", "", "DLQ topic to inspect (required)")
+	cmd.Flags().IntVar(&limit, "limit", dlq.DefaultInspectLimit, "Maximum number of messages to read")
+	cmd.Flags().IntVar(&maxBytes, "max-bytes", dlq.DefaultDisplayMaxBytes, "Truncate key/value payloads to this many bytes")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	return cmd
+}
 
-	cmd.AddCommand(&cobra.Command{
+// printDLQMessages renders one block per inspected message.
+func printDLQMessages(w io.Writer, views []dlqMessageView) {
+	for i, m := range views {
+		if i > 0 {
+			fmt.Fprintln(w, "---")
+		}
+		fmt.Fprintf(w, "partition=%d offset=%d time=%s key=%q\n", m.Partition, m.Offset, m.Timestamp.Format(time.RFC3339), m.Key)
+		fmt.Fprintf(w, "  value: %s\n", m.Value)
+		if len(m.Headers) > 0 {
+			keys := make([]string, 0, len(m.Headers))
+			for k := range m.Headers {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			var parts []string
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s=%s", k, m.Headers[k]))
+			}
+			fmt.Fprintf(w, "  headers: %s\n", strings.Join(parts, " "))
+		}
+	}
+}
+
+// dlqReplayView is the JSON shape of a replay run summary.
+type dlqReplayView struct {
+	DryRun   bool  `json:"dry_run"`
+	Total    int64 `json:"total"`
+	Replayed int64 `json:"replayed"`
+	Filtered int64 `json:"filtered"`
+	Skipped  int64 `json:"skipped"`
+	Failed   int64 `json:"failed"`
+	Batches  int   `json:"batches"`
+}
+
+func newDLQReplayCommand() *cobra.Command {
+	var (
+		topic        string
+		dryRun       bool
+		limit        int
+		olderThan    string
+		filter       string
+		skipExisting bool
+		jsonOut      bool
+	)
+	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay DLQ messages to original topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil // TODO: replay DLQ (Phase 6)
+			if topic == "" {
+				return fmt.Errorf("dlq replay: --topic is required")
+			}
+			var older time.Duration
+			if olderThan != "" {
+				d, err := time.ParseDuration(olderThan)
+				if err != nil {
+					return fmt.Errorf("dlq replay: --older-than %q: %w", olderThan, err)
+				}
+				older = d
+			}
+			cfg, err := CfgFromContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			res, err := dlq.Replay(cmd.Context(), dlq.ReplayOptions{
+				Brokers: cfg.Brokers, Topic: topic, DryRun: dryRun,
+				Limit: limit, OlderThan: older, Filter: filter, SkipExisting: skipExisting,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(dlqReplayView{
+					DryRun: res.DryRun, Total: res.Total, Replayed: res.Replayed,
+					Filtered: res.Filtered, Skipped: res.Skipped, Failed: res.Failed, Batches: res.Batches,
+				})
+			}
+			if dryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "would replay %d of %d messages (%d filtered, %d skipped)\n",
+					res.Replayed, res.Total, res.Filtered, res.Skipped)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "replayed %d of %d messages (%d filtered, %d skipped, %d failed) in %d batches\n",
+					res.Replayed, res.Total, res.Filtered, res.Skipped, res.Failed, res.Batches)
+			}
+			return nil
 		},
-	})
-
+	}
+	cmd.Flags().StringVar(&topic, "topic", "", "DLQ topic to replay (required)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Count and sample messages without producing")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum number of messages to read (0 = no limit)")
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "Only replay messages older than this duration (e.g. 1h)")
+	cmd.Flags().StringVar(&filter, "filter", "", "Only replay messages with a header key=value match")
+	cmd.Flags().BoolVar(&skipExisting, "skip-existing", false, "Skip messages already replayed (marker header present)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output summary as JSON")
 	return cmd
 }
 
