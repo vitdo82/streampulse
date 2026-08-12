@@ -27,6 +27,20 @@ type SkewReport struct {
 	Balanced bool           `json:"balanced"`
 }
 
+// ThroughputReport describes the time-of-day/day-of-week profile and trend of
+// one topic's rate metric over the window.
+type ThroughputReport struct {
+	Topic         string        `json:"topic"`
+	Metric        string        `json:"metric"`
+	Window        time.Duration `json:"window"`
+	HourlyProfile [24]float64   `json:"hourly_profile"` // mean per hour-of-day
+	DailyProfile  [7]float64    `json:"daily_profile"`  // mean per weekday
+	PeakHour      int           `json:"peak_hour"`
+	PeakDay       int           `json:"peak_day"`
+	Slope         float64       `json:"slope"`       // linear fit, per second
+	Forecast7d    float64       `json:"forecast_7d"` // projected rate in 7 days
+}
+
 // RetentionReport describes the retention posture of one topic.
 type RetentionReport struct {
 	Topic string `json:"topic"`
