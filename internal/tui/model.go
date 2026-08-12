@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/pulsedev/streampulse/internal/dlq"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/storage"
 )
@@ -122,6 +123,7 @@ type Model struct {
 
 	store       storage.MetricsStore
 	kafkaClient *kafka.Client
+	brokerAddrs []string // kafka mode: broker addresses for dlq inspect/replay
 
 	// Live data (updated every tick from store)
 	brokers        []BrokerRow
@@ -143,6 +145,16 @@ type Model struct {
 
 	// Sub-views
 	logView viewport.Model
+
+	// DLQ inspect view (open while dlqView != nil)
+	dlqView    *viewport.Model
+	dlqTopic   string
+	dlqConfirm bool
+
+	// DLQ module hooks (injectable for tests)
+	discoverDLQ func(ctx context.Context, client dlq.Client, suffixes []string) ([]dlq.Topic, error)
+	dlqInspectFn func(ctx context.Context, brokers []string, topic string, limit int) ([]dlq.Message, error)
+	dlqReplayFn  func(ctx context.Context, opts dlq.ReplayOptions) (*dlq.ReplayResult, error)
 }
 
 // NewModel creates a TUI model connected to the daemon's store.
@@ -177,6 +189,7 @@ func NewModelWithStore(store storage.MetricsStore) *Model {
 func NewModelWithKafka(client *kafka.Client) *Model {
 	return &Model{
 		kafkaClient: client,
+		brokerAddrs: client.Brokers(),
 		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
 	}
 }
@@ -440,6 +453,14 @@ func (m *Model) fetchFromKafka() DataUpdated {
 		})
 	}
 
+	dlqs, dlqErr := m.fetchDLQ(ctx)
+	if dlqErr != nil {
+		logf("dlq discovery error: %v", dlqErr)
+		data.Failed = true
+	} else {
+		data.DLQTopics = dlqs
+	}
+
 	data.Logs = logs
 	return data
 }
@@ -471,7 +492,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyData(msg)
 		m.buildTables()
 
+	case dlqInspectMsg:
+		m.handleDLQInspectMsg(msg)
+
+	case dlqReplayMsg:
+		m.handleDLQReplayMsg(msg)
+
 	case tea.KeyMsg:
+		if m.dlqView != nil {
+			cmds = append(cmds, m.handleDLQViewKey(msg))
+			break
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -483,6 +514,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx := int(msg.Runes[0] - '1'); idx < len(m.tabs) {
 				m.activeTab = idx
 			}
+		case "enter":
+			if m.activeTab == 4 && len(m.dlqTopics) > 0 {
+				topic := m.dlqTable.SelectedRow()[0]
+				cmds = append(cmds, m.openDLQView(topic))
+			}
 		case "r":
 			if !m.loading {
 				m.loading = true
@@ -492,6 +528,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// handleDLQViewKey handles keys while the DLQ inspect view is open.
+func (m *Model) handleDLQViewKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.closeDLQView()
+	case "r":
+		m.dlqConfirm = true
+	case "y":
+		if m.dlqConfirm {
+			m.dlqConfirm = false
+			return m.dlqReplayCmd()
+		}
+	case "n":
+		m.dlqConfirm = false
+	case "j", "down":
+		m.dlqView.LineDown(1)
+	case "k", "up":
+		m.dlqView.LineUp(1)
+	}
+	return nil
+}
+
+// closeDLQView returns to the DLQ table.
+func (m *Model) closeDLQView() {
+	m.dlqView = nil
+	m.dlqTopic = ""
+	m.dlqConfirm = false
 }
 
 func (m *Model) applyData(d DataUpdated) {
@@ -784,11 +849,27 @@ func (m *Model) renderAlertsView() string {
 }
 
 func (m *Model) renderDLQView() string {
+	if m.dlqView != nil {
+		prompt := ""
+		if m.dlqConfirm {
+			prompt = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FBBF24")).
+				Render(fmt.Sprintf("Replay %s to %s? (y/n)", m.dlqTopic, strings.TrimSuffix(m.dlqTopic, ".dlq"))) + "\n"
+		}
+		return lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES — "+m.dlqTopic),
+			prompt,
+			m.dlqView.View(),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  esc: back  │  r: replay  │  y/n: confirm  │  j/k: scroll"),
+		)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES"),
 		m.dlqTable.View(),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  ENTER: inspect  │  R: replay  │  D: drain  │  A: archive"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  ENTER: inspect  │  R: replay"),
 	)
 }
 
