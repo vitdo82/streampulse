@@ -55,3 +55,11 @@ type RetentionReport struct {
 	// the time-based retention.
 	AtRisk bool `json:"at_risk"`
 }
+
+// RebalanceReport counts rebalance events (transitions into PreparingRebalance)
+// for one consumer group on one UTC day.
+type RebalanceReport struct {
+	Group string    `json:"group"`
+	Day   time.Time `json:"day"` // UTC midnight of the day
+	Count int       `json:"count"`
+}
