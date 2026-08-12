@@ -125,6 +125,75 @@ func (s *SQLiteStore) QueryDaily(ctx context.Context, params QueryParams) ([]Met
 	return s.query(ctx, "daily_metrics", "bucket", params)
 }
 
+// QueryStateTransitions returns the consecutive value changes for one entity
+// within the window, in time order, via a LAG window function. A first sample
+// (no predecessor) and unchanged consecutive samples are skipped. From is
+// inclusive, To exclusive; a window with From >= To matches nothing.
+func (s *SQLiteStore) QueryStateTransitions(ctx context.Context, params QueryParams) ([]StateTransition, error) {
+	where := []string{"1=1"}
+	args := []any{}
+	if params.Metric != "" {
+		where = append(where, "metric = ?")
+		args = append(args, params.Metric)
+	}
+	if params.EntityType != "" {
+		where = append(where, "entity_type = ?")
+		args = append(args, params.EntityType)
+	}
+	if params.EntityName != "" {
+		where = append(where, "entity_name = ?")
+		args = append(args, params.EntityName)
+	}
+	if !params.From.IsZero() {
+		where = append(where, "ts >= ?")
+		args = append(args, params.From.UnixMilli())
+	}
+	if !params.To.IsZero() {
+		where = append(where, "ts < ?")
+		args = append(args, params.To.UnixMilli())
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT entity_name, ts, value,
+		       LAG(value) OVER (PARTITION BY entity_name ORDER BY ts) AS prev
+		FROM raw_metrics
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY entity_name, ts
+		LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("query state transitions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StateTransition
+	for rows.Next() {
+		var entity string
+		var ts, value int64
+		var prevNull sql.NullInt64
+		if err := rows.Scan(&entity, &ts, &value, &prevNull); err != nil {
+			return nil, fmt.Errorf("scan transition: %w", err)
+		}
+		if !prevNull.Valid || prevNull.Int64 == value {
+			continue
+		}
+		out = append(out, StateTransition{
+			Time:   time.UnixMilli(ts).UTC(),
+			Entity: entity,
+			From:   float64(prevNull.Int64),
+			To:     float64(value),
+		})
+	}
+	return out, rows.Err()
+}
+
 // query runs a filtered, ordered, limited SELECT over one metrics table.
 // Raw rows are grouped by (ts, identity, tags) into one MetricRow per point;
 // hourly/daily rows map their aggregate columns directly. A window with
