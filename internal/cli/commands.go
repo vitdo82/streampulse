@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/config"
 	"github.com/pulsedev/streampulse/internal/daemon"
 	"github.com/pulsedev/streampulse/internal/dlq"
@@ -349,7 +350,14 @@ func newDLQReplayCommand() *cobra.Command {
 }
 
 func newAnalyzeCommand() *cobra.Command {
-	return &cobra.Command{
+	var (
+		windowStr string
+		topicsStr string
+		skew      bool
+		retention bool
+		jsonOut   bool
+	)
+	cmd := &cobra.Command{
 		Use:   "analyze",
 		Short: "Analytics — trends, growth, partition skew",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -357,9 +365,153 @@ func newAnalyzeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_ = cfg // TODO: analytics (Phase 7)
+			window, err := time.ParseDuration(windowStr)
+			if err != nil || window <= 0 {
+				return fmt.Errorf("analyze: invalid window %q (e.g. 24h, 7d)", windowStr)
+			}
+			var topics []string
+			for _, t := range strings.Split(topicsStr, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					topics = append(topics, t)
+				}
+			}
+
+			store, err := storage.NewStore(cfg.Storage.Type, cfg.Storage.SQLite.Path)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			client, err := newKafkaClient(cfg)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+
+			analyzer := analytics.NewAnalyzer(store, client)
+
+			growth, err := analyzer.Growth(cmd.Context(), topics, window)
+			if err != nil {
+				return fmt.Errorf("analyze: growth: %w", err)
+			}
+			growth = topGrowth(growth, 10)
+
+			var skewReports []analytics.SkewReport
+			if skew {
+				skewReports, err = analyzer.Skew(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("analyze: skew: %w", err)
+				}
+			}
+			var retentionReports []analytics.RetentionReport
+			if retention {
+				reportTopics := topics
+				if len(reportTopics) == 0 {
+					for _, g := range growth {
+						reportTopics = append(reportTopics, g.Topic)
+					}
+				}
+				retentionReports, err = analyzer.Retention(cmd.Context(), reportTopics)
+				if err != nil {
+					return fmt.Errorf("analyze: retention: %w", err)
+				}
+			}
+
+			if len(growth) == 0 && len(skewReports) == 0 && len(retentionReports) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no data")
+				return nil
+			}
+			if jsonOut {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+					Growth    []analytics.GrowthReport    `json:"growth,omitempty"`
+					Skew      []analytics.SkewReport      `json:"skew,omitempty"`
+					Retention []analytics.RetentionReport `json:"retention,omitempty"`
+				}{Growth: growth, Skew: skewReports, Retention: retentionReports})
+			}
+			printGrowthReport(cmd.OutOrStdout(), growth)
+			printSkewReport(cmd.OutOrStdout(), skewReports)
+			printRetentionReport(cmd.OutOrStdout(), retentionReports)
 			return nil
 		},
+	}
+	cmd.Flags().StringVar(&windowStr, "window", "24h", "Growth window (e.g. 1h, 24h, 7d)")
+	cmd.Flags().StringVar(&topicsStr, "topics", "", "Comma-separated topic filter (default: top 10 by message volume)")
+	cmd.Flags().BoolVar(&skew, "skew", false, "Include the partition skew report")
+	cmd.Flags().BoolVar(&retention, "retention", false, "Include the retention report")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output full report structs as JSON")
+	return cmd
+}
+
+// topGrowth keeps the n topics with the highest total message rate in the
+// window, preserving the analyzer's name ordering.
+func topGrowth(reports []analytics.GrowthReport, n int) []analytics.GrowthReport {
+	if len(reports) <= n {
+		return reports
+	}
+	total := make(map[string]float64, len(reports))
+	for _, r := range reports {
+		for _, p := range r.Points {
+			total[r.Topic] += p.Rate
+		}
+	}
+	order := append([]analytics.GrowthReport(nil), reports...)
+	sort.SliceStable(order, func(i, j int) bool { return total[order[i].Topic] > total[order[j].Topic] })
+	return order[:n]
+}
+
+// printGrowthReport renders the growth section with per-topic sparklines.
+func printGrowthReport(w io.Writer, reports []analytics.GrowthReport) {
+	if len(reports) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Growth (%s window)\n", reports[0].Window)
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	for _, r := range reports {
+		fmt.Fprintf(tw, "  %s\t%s\t%+.2f msgs/s\n", r.Topic, r.Sparkline, r.Delta)
+	}
+	tw.Flush()
+}
+
+// printSkewReport renders the cluster leadership distribution.
+func printSkewReport(w io.Writer, reports []analytics.SkewReport) {
+	if len(reports) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Skew")
+	for _, r := range reports {
+		status := "balanced"
+		if !r.Balanced {
+			status = "SKEWED"
+		}
+		ids := make([]string, 0, len(r.Leaders))
+		for id := range r.Leaders {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		var parts []string
+		for _, id := range ids {
+			parts = append(parts, fmt.Sprintf("broker %s=%d", id, r.Leaders[id]))
+		}
+		fmt.Fprintf(w, "  ratio %.2f (%s)  %s\n", r.Ratio, status, strings.Join(parts, ", "))
+	}
+}
+
+// printRetentionReport renders the per-topic retention posture.
+func printRetentionReport(w io.Writer, reports []analytics.RetentionReport) {
+	if len(reports) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Retention")
+	for _, r := range reports {
+		atRisk := "no"
+		if r.AtRisk {
+			atRisk = "YES"
+		}
+		retention := "unknown"
+		if r.RetentionMS > 0 {
+			retention = fmt.Sprintf("%.1fh", r.RetentionMS.Hours())
+		}
+		fmt.Fprintf(w, "  %s: retention %s, oldest %s, fill estimate %.1fd, at risk: %s\n",
+			r.Topic, retention, r.OldestOffsetAge.Round(time.Minute), r.EstimateFillDays, atRisk)
 	}
 }
 
