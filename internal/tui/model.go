@@ -24,6 +24,7 @@ import (
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
+	"github.com/pulsedev/streampulse/internal/tail"
 )
 
 // ─── Styles ────────────────────────────────────────────────────────────────
@@ -177,6 +178,16 @@ type Model struct {
 	analyzeOut      string
 	analyzeViewOpen bool
 	analyzeView     *viewport.Model
+
+	// Topic tail view (Topics tab, Enter)
+	tailTopic    string
+	tailMessages []tail.Message
+	tailOffsets  map[int]int64
+	tailPaused   bool
+	tailPinned   bool
+	tailErr      string
+	tailView     *viewport.Model
+	tailBrokerFn func() tail.Broker // test injection
 
 	// DLQ module hooks (injectable for tests)
 	discoverDLQ  func(ctx context.Context, client dlq.Client, suffixes []string) ([]dlq.Topic, error)
@@ -689,6 +700,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dlqReplayMsg:
 		m.handleDLQReplayMsg(msg)
 
+	case tailSnapshotMsg:
+		cmds = append(cmds, m.handleTailSnapshotMsg(msg))
+
+	case tailFollowMsg:
+		m.handleTailFollowMsg(msg)
+
+	case tailRetryMsg:
+		if msg.topic == m.tailTopic && m.tailView != nil {
+			cmds = append(cmds, m.tailSnapshotCmd())
+		}
+
+	case tailTickMsg:
+		if m.tailTopic != "" && m.tailView != nil && !m.tailPaused {
+			cmds = append(cmds, m.tailFollowCmd())
+		}
+		cmds = append(cmds, tea.Tick(tailFollowInterval, func(t time.Time) tea.Msg {
+			return tailTickMsg(t)
+		}))
+
 	case analyzeDoneMsg:
 		m.analyzeRunning = false
 		if msg.err != nil {
@@ -704,6 +734,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.dlqView != nil {
 			cmds = append(cmds, m.handleDLQViewKey(msg))
+			break
+		}
+		if m.tailView != nil {
+			cmds = append(cmds, m.handleTailViewKey(msg))
 			break
 		}
 		if m.analyzeViewOpen {
@@ -743,6 +777,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == 4 && len(m.dlqTopics) > 0 {
 				topic := m.dlqTable.SelectedRow()[0]
 				cmds = append(cmds, m.openDLQView(topic))
+			}
+			if m.activeTab == 1 && len(m.topics) > 0 {
+				topic := m.topicsTable.SelectedRow()[0]
+				cmds = append(cmds, m.openTailView(topic))
 			}
 		case "r":
 			if !m.loading {
@@ -1199,9 +1237,13 @@ func (m *Model) renderOverview() string {
 }
 
 func (m *Model) renderTopicsView() string {
+	if m.tailView != nil {
+		return m.renderTailView()
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("TOPICS"),
 		m.topicsTable.View(),
+		helpStyle.Render("  ENTER: tail topic"),
 	)
 }
 

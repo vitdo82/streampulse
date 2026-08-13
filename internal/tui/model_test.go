@@ -13,6 +13,7 @@ import (
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/scraper"
 	"github.com/pulsedev/streampulse/internal/storage"
+	"github.com/pulsedev/streampulse/internal/tail"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -799,4 +800,190 @@ func TestRenderAnalyzeView(t *testing.T) {
 	view := m.View()
 	assert.Contains(t, view, "analysis results")
 	assert.Contains(t, view, "esc/q: close")
+}
+
+// ─── Topic tail view ────────────────────────────────────────────────────────
+
+func TestEnterOnTopicsOpensTail(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.activeTab = 1
+	m.topics = []TopicRow{{Name: "orders", Partitions: 6}}
+	m.buildTables()
+
+	tm, cmd := m.Update(key("enter"))
+	m = tm.(*Model)
+	assert.Equal(t, "orders", m.tailTopic, "Enter on a topics row opens the tail view")
+	assert.NotNil(t, m.tailView)
+	assert.NotNil(t, cmd, "Enter dispatches the snapshot command")
+
+	tm, _ = m.Update(key("enter"))
+	m = tm.(*Model)
+	assert.Equal(t, "orders", m.tailTopic, "double Enter is harmless")
+}
+
+func TestEnterOffTopicsTabDoesNothing(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.activeTab = 0
+	m.topics = []TopicRow{{Name: "orders", Partitions: 6}}
+
+	tm, cmd := m.Update(key("enter"))
+	m = tm.(*Model)
+	assert.Equal(t, "", m.tailTopic)
+	assert.Nil(t, cmd)
+}
+
+func TestTailSnapshotPopulatesAndSeedsOffsets(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+
+	ts := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	tm, cmd := m.Update(tailSnapshotMsg{topic: "orders", msgs: []tail.Message{
+		{Topic: "orders", Partition: 0, Offset: 10, Value: []byte("a"), Timestamp: ts},
+		{Topic: "orders", Partition: 0, Offset: 11, Value: []byte("b"), Timestamp: ts},
+	}})
+	m = tm.(*Model)
+	assert.Empty(t, m.tailErr)
+	assert.Len(t, m.tailMessages, 2)
+	assert.Equal(t, int64(12), m.tailOffsets[0], "offsets seeded to last offset + 1")
+	assert.NotNil(t, cmd, "follow tick starts after a successful snapshot")
+	assert.Contains(t, m.tailView.View(), "a")
+}
+
+func TestTailSnapshotEmptyStartsFromWatermark(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+
+	tm, _ := m.Update(tailSnapshotMsg{topic: "orders"})
+	m = tm.(*Model)
+	assert.Nil(t, m.tailOffsets, "empty snapshot → follow from high-watermarks")
+	assert.Contains(t, m.tailView.View(), "no messages")
+}
+
+func TestTailSnapshotErrorRetries(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+
+	tm, cmd := m.Update(tailSnapshotMsg{topic: "orders", err: fmt.Errorf("boom")})
+	m = tm.(*Model)
+	assert.Contains(t, m.tailErr, "boom")
+	assert.Contains(t, m.tailView.View(), "boom")
+	assert.NotNil(t, cmd, "retry is scheduled after a snapshot failure")
+}
+
+func TestTailRetryRerunsSnapshot(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	m.tailErr = "boom"
+
+	tm, cmd := m.Update(tailRetryMsg{topic: "orders"})
+	m = tm.(*Model)
+	assert.NotNil(t, cmd, "retry dispatches a fresh snapshot")
+}
+
+func TestTailFollowAppendsAndCapsBuffer(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	ts := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	// fill past the cap
+	fill := make([]tail.Message, 0, 250)
+	for i := 0; i < 250; i++ {
+		fill = append(fill, tail.Message{Topic: "orders", Partition: 0, Offset: int64(i), Value: []byte("x"), Timestamp: ts})
+	}
+	tm, _ := m.Update(tailSnapshotMsg{topic: "orders", msgs: fill})
+	m = tm.(*Model)
+	assert.Len(t, m.tailMessages, tailBufferCap, "buffer capped at 200")
+
+	tm, _ = m.Update(tailFollowMsg{topic: "orders", msgs: []tail.Message{
+		{Topic: "orders", Partition: 0, Offset: 251, Value: []byte("new"), Timestamp: ts},
+	}, offs: map[int]int64{0: 252}})
+	m = tm.(*Model)
+	assert.Len(t, m.tailMessages, tailBufferCap)
+	assert.Equal(t, "new", string(m.tailMessages[len(m.tailMessages)-1].Value))
+	assert.Equal(t, int64(252), m.tailOffsets[0])
+}
+
+func TestTailPauseSkipsFollow(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	m.tailPaused = true
+
+	tm, cmds := m.Update(tailTickMsg(time.Now()))
+	m = tm.(*Model)
+	_ = cmds
+	assert.Equal(t, "", m.tailErr)
+	assert.True(t, m.tailPaused)
+
+	m.tailPaused = false
+	tm, _ = m.Update(tailTickMsg(time.Now()))
+	m = tm.(*Model)
+	assert.True(t, m.tailPaused == false, "unpaused tick proceeds")
+}
+
+func TestTailPauseToggle(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+
+	tm, _ := m.Update(key("p"))
+	m = tm.(*Model)
+	assert.True(t, m.tailPaused, "p pauses the tail")
+
+	tm, _ = m.Update(key("p"))
+	m = tm.(*Model)
+	assert.False(t, m.tailPaused, "p resumes the tail")
+}
+
+func TestTailKeyNavigation(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	m.tailView.SetContent(strings.Repeat("line\n", 60))
+
+	// scroll down unpins
+	tm, _ := m.Update(key("j"))
+	m = tm.(*Model)
+	assert.False(t, m.tailPinned, "manual scroll unpins auto-scroll")
+	assert.Greater(t, m.tailView.YOffset, 0)
+
+	// g re-pins and goes to bottom
+	tm, _ = m.Update(key("g"))
+	m = tm.(*Model)
+	assert.True(t, m.tailPinned)
+	assert.True(t, m.tailView.AtBottom(), "g pins to the bottom")
+}
+
+func TestEscAndQCloseTail(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+
+	tm, _ := m.Update(key("esc"))
+	m = tm.(*Model)
+	assert.Nil(t, m.tailView)
+	assert.Equal(t, "", m.tailTopic)
+
+	m.openTailView("orders")
+	tm, _ = m.Update(key("q"))
+	m = tm.(*Model)
+	assert.Nil(t, m.tailView, "q closes the tail view instead of quitting")
+}
+
+func TestRenderTailView(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	m.tailView.SetContent("[p 0|o 1] hello")
+
+	view := m.renderTopicsView()
+	assert.Contains(t, view, "TAIL orders")
+	assert.Contains(t, view, "hello")
+	assert.Contains(t, view, "p: pause/resume")
 }
