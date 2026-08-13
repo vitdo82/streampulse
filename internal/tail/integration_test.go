@@ -25,10 +25,10 @@ func TestSnapshotAndReadNewIntegration(t *testing.T) {
 	defer cancel()
 
 	admin := &kafka.Client{Addr: kafka.TCP(broker)}
-	if err := admin.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}}}); err != nil {
+	if _, err := admin.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}}}); err != nil {
 		t.Skipf("Kafka not available at %s: %v", broker, err)
 	}
-	defer admin.DeleteTopics(ctx, &kafka.DeleteTopicsRequest{Topics: []string{topic}})
+	admin.DeleteTopics(ctx, &kafka.DeleteTopicsRequest{Topics: []string{topic}})
 
 	produce := func(n int) {
 		w := &kafka.Writer{Addr: kafka.TCP(broker), Topic: topic}
