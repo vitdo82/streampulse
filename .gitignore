@@ -41,3 +41,4 @@ release/
 # Environment
 .env
 .env.local
+tests/e2e/.verify/

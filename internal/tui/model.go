@@ -1144,13 +1144,17 @@ func (m *Model) renderHeader() string {
 		Foreground(lipgloss.Color("#6B7280")).
 		Render(status)
 
+	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	if pad < 0 {
+		pad = 0 // narrow terminals must not panic (strings.Repeat with negative count)
+	}
 	bar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#1F1A2E")).
 		Width(m.width).
 		Padding(0, 2).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left,
 			left,
-			strings.Repeat(" ", m.width-lipgloss.Width(left)-lipgloss.Width(right)-4),
+			strings.Repeat(" ", pad),
 			right))
 
 	return bar

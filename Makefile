@@ -1,5 +1,10 @@
 .PHONY: build run test lint clean install
 
+# Ensure go/vhs resolve even when the invoking shell omits Homebrew's bin dir
+# (non-interactive shells often do). A missing dir in PATH is harmless.
+PATH := $(PATH):/opt/homebrew/bin
+export PATH
+
 APP_NAME    := streampulse
 BUILD_DIR   := bin
 CMD_DIR     := cmd/streampulse
@@ -24,6 +29,34 @@ serve: build
 ## test: Run all tests
 test:
 	go test -v -race -count=1 ./...
+
+## e2e: Run VHS TUI end-to-end tests (requires vhs + docker Kafka)
+e2e: build
+	@command -v vhs >/dev/null 2>&1 || { echo "vhs not found — run: brew install vhs"; exit 1; }
+	@docker exec streampulse-kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9093 >/dev/null 2>&1 || { echo "Kafka not reachable — run: docker compose up -d"; exit 1; }
+	vhs tests/e2e/vhs/*.tape
+	@echo "Screenshots written to tests/e2e/screenshots/"
+
+## e2e-watch: Replay a tape live (TAPE=02-topics-search.tape)
+e2e-watch:
+	@test -n "$(TAPE)" || { echo "Usage: make e2e-watch TAPE=02-topics-search.tape"; exit 1; }
+	vhs play tests/e2e/vhs/$(TAPE)
+
+## e2e-verify: OCR one frame per second of each GIF and check expected labels
+## (requires ffmpeg + tesseract; frame extraction via ffmpeg — magick's
+## per-frame extraction yields blank disposal layers for animated GIFs)
+e2e-verify:
+	@mkdir -p tests/e2e/.verify
+	@for gif in tests/e2e/screenshots/*.gif; do \
+		echo "== $$gif =="; \
+		ffmpeg -y -loglevel error -i "$$gif" -vf fps=1 tests/e2e/.verify/f-%02d.png; \
+		labels=""; \
+		for f in tests/e2e/.verify/f-*.png; do \
+			labels="$$labels $$(tesseract "$$f" stdout 2>/dev/null | grep -aoE 'StreamPulse|BROKERS|TOPICS|ANALYTICS|DEAD LETTER QUEUES|TAIL|payments\.dlq|orders')"; \
+		done; \
+		echo "$$labels" | tr ' ' '\n' | grep -v '^$$' | sort | uniq -c; \
+		rm -f tests/e2e/.verify/f-*.png; \
+	done
 
 ## test-cover: Run tests with coverage
 test-cover:
