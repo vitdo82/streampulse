@@ -761,7 +761,7 @@ func TestAnalyzeDoneMsgError(t *testing.T) {
 	assert.Contains(t, m.analyzeOut, "analyze failed: boom")
 }
 
-func TestEscAndQCloseAnalyzeView(t *testing.T) {
+func TestEscClosesAnalyzeAndQQuits(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.analyzeViewOpen = true
 
@@ -770,9 +770,11 @@ func TestEscAndQCloseAnalyzeView(t *testing.T) {
 	assert.False(t, m.analyzeViewOpen, "esc closes the analyze view")
 
 	m.analyzeViewOpen = true
-	tm, _ = m.Update(key("q"))
+	tm, cmd := m.Update(key("q"))
 	m = tm.(*Model)
-	assert.False(t, m.analyzeViewOpen, "q closes the analyze view instead of quitting")
+	assert.True(t, m.analyzeViewOpen, "q must not close the analyze view")
+	require.NotNil(t, cmd, "q must quit the app")
+	assert.IsType(t, tea.QuitMsg{}, cmd())
 }
 
 func TestAnalyzeViewScrolling(t *testing.T) {
@@ -799,7 +801,8 @@ func TestRenderAnalyzeView(t *testing.T) {
 
 	view := m.View()
 	assert.Contains(t, view, "analysis results")
-	assert.Contains(t, view, "esc/q: close")
+	assert.Contains(t, view, "esc: close")
+	assert.NotContains(t, view, "esc/q: close", "help must not advertise q as close")
 }
 
 // ─── Topic tail view ────────────────────────────────────────────────────────
@@ -960,7 +963,7 @@ func TestTailKeyNavigation(t *testing.T) {
 	assert.True(t, m.tailView.AtBottom(), "g pins to the bottom")
 }
 
-func TestEscAndQCloseTail(t *testing.T) {
+func TestEscClosesTailAndQQuits(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.ready = true
 	m.openTailView("orders")
@@ -971,9 +974,12 @@ func TestEscAndQCloseTail(t *testing.T) {
 	assert.Equal(t, "", m.tailTopic)
 
 	m.openTailView("orders")
-	tm, _ = m.Update(key("q"))
+	tm, cmd := m.Update(key("q"))
 	m = tm.(*Model)
-	assert.Nil(t, m.tailView, "q closes the tail view instead of quitting")
+	assert.NotNil(t, m.tailView, "q must not close the tail view")
+	assert.Equal(t, "orders", m.tailTopic, "q must not clear the tail topic")
+	require.NotNil(t, cmd, "q must quit the app")
+	assert.IsType(t, tea.QuitMsg{}, cmd())
 }
 
 func TestRenderTailView(t *testing.T) {
@@ -986,4 +992,6 @@ func TestRenderTailView(t *testing.T) {
 	assert.Contains(t, view, "TAIL orders")
 	assert.Contains(t, view, "hello")
 	assert.Contains(t, view, "p: pause/resume")
+	assert.Contains(t, view, "esc: close")
+	assert.NotContains(t, view, "esc/q: close", "help must not advertise q as close")
 }

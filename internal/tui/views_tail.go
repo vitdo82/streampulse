@@ -182,8 +182,10 @@ func (m *Model) renderTailMessages() {
 // handleTailViewKey handles keys while the tail view is open.
 func (m *Model) handleTailViewKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
-	case "esc", "q":
+	case "esc":
 		m.closeTailView()
+	case "q", "ctrl+c":
+		return tea.Quit
 	case "p":
 		m.tailPaused = !m.tailPaused
 	case "g":
@@ -234,6 +236,6 @@ func (m *Model) renderTailView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		body,
-		helpStyle.Render("  esc/q: close  │  p: pause/resume  │  j/k: scroll  │  g: bottom"),
+		helpStyle.Render("  esc: close  │  p: pause/resume  │  j/k: scroll  │  g: bottom"),
 	)
 }

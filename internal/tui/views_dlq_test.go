@@ -128,6 +128,18 @@ func TestDLQEscClosesInspectView(t *testing.T) {
 	assert.False(t, m.dlqConfirm)
 }
 
+func TestDLQQQuitsInsteadOfClosing(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	openDLQView(t, m, "payments.dlq", nil, nil)
+
+	tm, cmd := m.Update(key("q"))
+	m = tm.(*Model)
+	assert.NotNil(t, m.dlqView, "q must not close the inspect view")
+	assert.Equal(t, "payments.dlq", m.dlqTopic, "q must not clear the DLQ topic")
+	require.NotNil(t, cmd, "q must quit the app")
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+}
+
 func TestDLQReplayConfirmAndCancel(t *testing.T) {
 	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
 	openDLQView(t, m, "payments.dlq", nil, nil)
