@@ -102,6 +102,29 @@ go test ./... -count=1           # All tests
 go test ./internal/tui/ -v       # TUI tests only
 ```
 
+### E2E Tests (VHS)
+```bash
+make e2e               # build + run all tapes → tests/e2e/screenshots/*.gif
+make e2e-watch TAPE=02-topics-search.tape   # live replay of one tape
+make e2e-verify        # OCR each GIF and report expected labels
+```
+Requires `vhs`, `ffmpeg`, `tesseract`, and Kafka via `docker compose up -d`.
+
+### Confirm Work in the GitHub Issue
+After implementing a task linked to a GitHub issue, always post a verification
+comment on that issue (via `gh issue comment <n>`). The comment MUST include:
+
+1. **Summary** — a short statement of what was implemented.
+2. **E2E report** — a table listing each e2e tape and its execution status
+   (`PASS`/`FAIL`) from `make e2e` + `make e2e-verify`.
+3. **Screenshots** — no more than 2 files of the feature's e2e tests, all
+   different (never post duplicates), linked from `tests/e2e/screenshots/` via
+   raw GitHub URLs:
+
+   ```
+   ![<tape>](https://raw.githubusercontent.com/<owner>/streampulse/<branch>/tests/e2e/screenshots/<name>.gif)
+   ```
+
 ## Docker Development
 
 ```yaml
