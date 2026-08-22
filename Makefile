@@ -34,7 +34,10 @@ test:
 e2e: build
 	@command -v vhs >/dev/null 2>&1 || { echo "vhs not found — run: brew install vhs"; exit 1; }
 	@docker exec streampulse-kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9093 >/dev/null 2>&1 || { echo "Kafka not reachable — run: docker compose up -d"; exit 1; }
-	vhs tests/e2e/vhs/*.tape
+	@for tape in tests/e2e/vhs/*.tape; do \
+		echo "== $$tape =="; \
+		vhs "$$tape" || exit 1; \
+	done
 	@echo "Screenshots written to tests/e2e/screenshots/"
 
 ## e2e-watch: Replay a tape live (TAPE=02-topics-search.tape)
@@ -52,7 +55,7 @@ e2e-verify:
 		ffmpeg -y -loglevel error -i "$$gif" -vf fps=1 tests/e2e/.verify/f-%02d.png; \
 		labels=""; \
 		for f in tests/e2e/.verify/f-*.png; do \
-			labels="$$labels $$(tesseract "$$f" stdout 2>/dev/null | grep -aoE 'StreamPulse|BROKERS|TOPICS|ANALYTICS|DEAD LETTER QUEUES|TAIL|payments\.dlq|orders')"; \
+			labels="$$labels $$(tesseract "$$f" stdout 2>/dev/null | grep -aoE 'StreamPulse|BROKERS|TOPICS|ANALYTICS|DEAD LETTER QUEUES|TAIL|payments\.dlq|orders|Q_QUIT_OK')"; \
 		done; \
 		echo "$$labels" | tr ' ' '\n' | grep -v '^$$' | sort | uniq -c; \
 		rm -f tests/e2e/.verify/f-*.png; \

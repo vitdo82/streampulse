@@ -38,6 +38,7 @@ vhs tests/e2e/vhs/02-topics-search.tape
   # 01-overview.gif        → BROKERS, TOPICS
   # 02-topics-search.gif   → StreamPulse, TOPICS, orders (filtered list)
   # 04-dlq.gif             → DEAD LETTER QUEUES, payments.dlq
+  # 06-overlay-q-quit.gif  → Q_QUIT_OK (shell prompt returned after q)
   ```
 - **VHS v0.11 limitations:** no built-in assertions, and `Output "x.png"` writes a
   *directory of frames* rather than a single image — GIFs are the primary artifact.
@@ -52,6 +53,7 @@ vhs tests/e2e/vhs/02-topics-search.tape
 | `03-topic-tail.tape` | Enter on a topic → tail view, `p` pause | `TAIL orders`, `following`/`paused`, `[p 0\|o` message lines |
 | `04-dlq.tape` | DLQ tab + Enter inspect | `payments.dlq`, `DEAD LETTER QUEUES`, inspect payloads |
 | `05-analytics.tape` | Analytics tab + `a` analyze CLI view | `ANALYTICS`, `analyze --window`, `no data` |
+| `06-overlay-q-quit.tape` | `q` in the tail overlay quits the app | `Q_QUIT_OK` (sentinel printed after quit) |
 
 ## Status notes
 

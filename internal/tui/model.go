@@ -814,6 +814,8 @@ func (m *Model) handleDLQViewKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.closeDLQView()
+	case "q", "ctrl+c":
+		return tea.Quit
 	case "r":
 		m.dlqConfirm = true
 	case "y":
@@ -858,9 +860,11 @@ func (m *Model) analyzeCmd() tea.Cmd {
 // handleAnalyzeViewKey handles keys while the analyze CLI view is open.
 func (m *Model) handleAnalyzeViewKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
-	case "esc", "q":
+	case "esc":
 		m.analyzeViewOpen = false
 		m.analyzeOut = ""
+	case "q", "ctrl+c":
+		return tea.Quit
 	case "j", "down":
 		if m.analyzeView != nil {
 			m.analyzeView.LineDown(1)
@@ -1122,7 +1126,7 @@ func (m *Model) renderAnalyzeView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		body,
-		helpStyle.Render("  esc/q: close  │  j/k: scroll"),
+		helpStyle.Render("  esc: close  │  j/k: scroll"),
 	)
 }
 
