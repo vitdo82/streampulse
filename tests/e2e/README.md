@@ -56,6 +56,9 @@ vhs tests/e2e/vhs/02-topics-search.tape
 | `05-analytics.tape` | Analytics tab + `a` analyze CLI view | `ANALYTICS`, `analyze --window`, `no data` |
 | `06-overlay-q-quit.tape` | `q` in the tail overlay quits the app | `Q_QUIT_OK` (sentinel printed after quit) |
 | `07-scrollable-content.tape` | Small (80x24) terminal; Topics + Analytics scroll | `TOPICS`, `ANALYTICS`, `REBALANCES`, `PATTERNS` |
+| `08-pagination.tape` | Large table + `pgup`/`pgdn` | `Showing`, `PAGINATION_OK` |
+| `09-search-no-results.tape` | Topics search with no matches | `No match`, `NO_RESULTS_OK` |
+| `10-help-modal.tape` | `?` opens the keybinding legend modal, `esc` closes | `KEYBINDINGS` |
 
 ## Status notes
 

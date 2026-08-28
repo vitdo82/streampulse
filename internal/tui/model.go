@@ -156,6 +156,9 @@ type Model struct {
 	searching   bool
 	searchQuery string
 
+	// Help modal (? opens, esc closes)
+	helpOpen bool
+
 	// Tables (rebuilt on data change)
 	brokersTable table.Model
 	topicsTable  table.Model
@@ -776,6 +779,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// "?" opens the help modal from any view or overlay; while the modal
+		// is open only esc (close) and q/ctrl+c (quit) are live.
+		if msg.String() == "?" {
+			m.helpOpen = true
+			break
+		}
+		if m.helpOpen {
+			cmds = append(cmds, m.handleHelpKey(msg))
+			break
+		}
 		if m.dlqView != nil {
 			cmds = append(cmds, m.handleDLQViewKey(msg))
 			break
@@ -902,6 +915,17 @@ func (m *Model) closeDLQView() {
 	m.dlqView = nil
 	m.dlqTopic = ""
 	m.dlqConfirm = false
+}
+
+// handleHelpKey handles keys while the ? help modal is open.
+func (m *Model) handleHelpKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.helpOpen = false
+	case "q", "ctrl+c":
+		return tea.Quit
+	}
+	return nil
 }
 
 // analyzeCmd shells out to the analyze CLI, capturing its output.
@@ -1205,6 +1229,10 @@ func (m *Model) View() string {
 
 	if m.analyzeViewOpen {
 		return m.renderAnalyzeView()
+	}
+
+	if m.helpOpen {
+		return m.renderHelpModal()
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -1663,23 +1691,40 @@ func (m *Model) renderPatternsPane() string {
 	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
-// renderHelp renders the one-line footer. Keys are contextual per tab so the
-// bar never wraps even at the 80-column acceptance width.
+// renderHelp renders the one-line footer: the keys relevant to the current
+// view/overlay plus the global keys (1-6 jump, r refresh, ? help, q quit).
+// The full legend lives in the ? modal, so the bar stays short enough not to
+// wrap even at the 80-column acceptance width. Context keys are chosen so the
+// bar never advertises a key that does nothing in the current view.
 func (m *Model) renderHelp() string {
-	help := "tab/l: switch │ 1-6: jump │ r: refresh │ q: quit"
+	context := ""
 	switch {
 	case m.searching:
-		help = fmt.Sprintf("/ search: %s — %d of %d (case-insensitive) │ esc: close",
-			m.searchQuery, len(filteredTopics(m.topics, m.searchQuery)), len(m.topics))
+		return helpStyle.Render(
+			lipgloss.NewStyle().
+				Background(lipgloss.Color("#1F1A2E")).
+				Width(m.width).
+				MaxHeight(1).
+				Padding(0, 2).
+				Render(fmt.Sprintf("/ search: %s — %d of %d (case-insensitive) │ esc: close",
+					m.searchQuery, len(filteredTopics(m.topics, m.searchQuery)), len(m.topics))),
+		)
+	case m.dlqView != nil:
+		context = "r: replay │ esc: back │ "
+	case m.tailView != nil:
+		context = "p: pause/resume │ esc: back │ "
 	case m.activeTab == 1:
-		help = "tab/l: switch │ /: search │ enter: tail topic │ pgup/pgdn: page │ q: quit"
+		context = "/: search │ enter: tail │ "
 	case m.activeTab == 2:
-		help = "tab/l: switch │ pgup/pgdn: page │ q: quit"
+		context = "pgup/pgdn: page │ "
 	case m.activeTab == 4:
-		help = "tab/l: switch │ enter: inspect DLQ topic │ q: quit"
+		context = "enter: inspect │ "
 	case m.activeTab == 5:
-		help = "j/k: scroll │ [/]: cycle topic │ w: window │ a: analyze │ q: quit"
+		context = "w: window │ a: analyze │ "
+	case m.activeTab == 0:
+		context = "j/k: move │ "
 	}
+	help := context + "1-6: jump │ r: refresh │ ?: help │ q: quit"
 	return helpStyle.Render(
 		lipgloss.NewStyle().
 			Background(lipgloss.Color("#1F1A2E")).
@@ -1688,6 +1733,59 @@ func (m *Model) renderHelp() string {
 			Padding(0, 2).
 			Render(help),
 	)
+}
+
+// renderHelpModal renders the full keybinding legend overlay, shown when ? is
+// pressed and dismissed with esc. It documents every global and per-view key
+// so the footer itself can stay short.
+func (m *Model) renderHelpModal() string {
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render("KEYBINDINGS"),
+		"",
+		" GLOBAL",
+		"   1-6       jump to tab",
+		"   tab/l/h   switch tab",
+		"   r         refresh",
+		"   ?         this help",
+		"   q         quit",
+		"",
+		" TABLES (Overview, Consumers, Alerts, DLQ)",
+		"   j/k       move selection",
+		"   pgup/dn   page",
+		"   enter     open (tail topic / DLQ topic)",
+		"",
+		" TOPICS",
+		"   /         search",
+		"",
+		" ANALYTICS",
+		"   j/k       scroll",
+		"   [ / ]     cycle pattern topic",
+		"   w         analyze window",
+		"   a         run analyze",
+		"",
+		" TAIL (Enter on a topic)",
+		"   p         pause/resume",
+		"   g         jump to bottom",
+		"   esc       back",
+		"",
+		" DLQ INSPECT (Enter on a DLQ topic)",
+		"   r         replay",
+		"   y/n       confirm replay",
+		"   esc       back",
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#4C1D95")).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	box = lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(box)
+
+	vpad := m.height - lipgloss.Height(box)
+	if vpad > 0 {
+		box = strings.Repeat("\n", vpad/2) + box
+	}
+	return box + "\n" + helpStyle.Render("  esc: close  │  q: quit")
 }
 
 // Run starts the bubbletea program with live data.
