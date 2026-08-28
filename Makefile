@@ -55,7 +55,7 @@ e2e-verify:
 		ffmpeg -y -loglevel error -i "$$gif" -vf fps=1 tests/e2e/.verify/f-%02d.png; \
 		labels=""; \
 		for f in tests/e2e/.verify/f-*.png; do \
-			labels="$$labels $$(tesseract "$$f" stdout 2>/dev/null | grep -aoE 'StreamPulse|BROKERS|TOPICS|ANALYTICS|DEAD LETTER QUEUES|TAIL|payments\.dlq|orders|REBALANCES|PATTERNS|Q_QUIT_OK|Showing|bulk|PAGINATION_OK')"; \
+			labels="$$labels $$(tesseract "$$f" stdout 2>/dev/null | grep -aoE 'StreamPulse|BROKERS|TOPICS|ANALYTICS|DEAD LETTER QUEUES|TAIL|payments\.dlq|orders|REBALANCES|PATTERNS|Q_QUIT_OK|Showing|bulk|PAGINATION_OK|No match|case-insensitive|NO_RESULTS_OK')"; \
 		done; \
 		echo "$$labels" | tr ' ' '\n' | grep -v '^$$' | sort | uniq -c; \
 		rm -f tests/e2e/.verify/f-*.png; \

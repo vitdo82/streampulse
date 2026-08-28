@@ -224,6 +224,29 @@ func TestPaginationIndicatorCountsFilteredTopics(t *testing.T) {
 	assert.Contains(t, view, "Showing 2 of 4", "filtered count must update after search")
 }
 
+func TestSearchFooterShowsMatchCount(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}, {Name: "orders.dlq"}, {Name: "audit"}}
+	m.searching = true
+	m.searchQuery = "orders"
+
+	help := m.renderHelp()
+	assert.Contains(t, help, "orders — 2 of 4", "footer must show query and match count while searching")
+	assert.Contains(t, help, "case-insensitive", "help text must communicate case-insensitivity")
+}
+
+func TestSearchNoMatchesShowsDistinctState(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}}
+	m.searchQuery = "zzz"
+	m.activeTab = 1
+	m.buildTables()
+
+	view := m.renderContent()
+	assert.Contains(t, view, "No match /zzz/", "zero matches must show a distinct state")
+	assert.NotContains(t, view, "No data")
+}
+
 func manyTopics(n int) []TopicRow {
 	rows := make([]TopicRow, n)
 	for i := range rows {
