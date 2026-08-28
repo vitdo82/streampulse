@@ -1050,7 +1050,7 @@ func (m *Model) buildTables() {
 			{Title: "BYTES/S", Width: 12},
 			{Title: "RETENTION", Width: 12},
 		},
-		rowsFromTopics(filteredTopics(m.topics, m.searchQuery)),
+		rowsFromTopics(filteredTopics(m.topics, m.searchQuery), m.searchQuery),
 		m.topicsTable.Cursor(), topicsMax,
 	)
 
@@ -1129,8 +1129,14 @@ func rowsFromBrokers(b []BrokerRow) []table.Row {
 	return rows
 }
 
-func rowsFromTopics(t []TopicRow) []table.Row {
+// rowsFromTopics renders topic rows, or a distinct "no match" state when a
+// search query filters everything out. The full query + count live in the
+// footer, so the row stays short enough for the 20-wide TOPIC column.
+func rowsFromTopics(t []TopicRow, query string) []table.Row {
 	if len(t) == 0 {
+		if query != "" {
+			return []table.Row{{fmt.Sprintf("No match /%s/", query), "-", "-", "-", "-"}}
+		}
 		return []table.Row{{"No data", "-", "-", "-", "-"}}
 	}
 	rows := make([]table.Row, len(t))
@@ -1663,7 +1669,8 @@ func (m *Model) renderHelp() string {
 	help := "tab/l: switch │ 1-6: jump │ r: refresh │ q: quit"
 	switch {
 	case m.searching:
-		help = fmt.Sprintf("/ search: %s │ esc: close", m.searchQuery)
+		help = fmt.Sprintf("/ search: %s — %d of %d (case-insensitive) │ esc: close",
+			m.searchQuery, len(filteredTopics(m.topics, m.searchQuery)), len(m.topics))
 	case m.activeTab == 1:
 		help = "tab/l: switch │ /: search │ enter: tail topic │ pgup/pgdn: page │ q: quit"
 	case m.activeTab == 2:
