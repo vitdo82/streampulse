@@ -345,17 +345,19 @@ func TestJKMoveActiveTableCursor(t *testing.T) {
 	m = tm.(*Model)
 	assert.Equal(t, 1, m.topicsTable.Cursor())
 
-	// The cursor moves only on the active tab's table.
+	// Rebuilding tables (as the 2s refresh does) preserves the selection.
 	m.consumerGroups = []ConsumerGroupRow{{Group: "g1"}, {Group: "g2"}, {Group: "g3"}}
 	m.buildTables()
+	assert.Equal(t, 1, m.topicsTable.Cursor(), "refresh must keep the topics cursor")
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.topicsTable.Cursor())
+	assert.Equal(t, 2, m.topicsTable.Cursor())
 
+	// The cursor moves only on the active tab's table.
 	m.activeTab = 2
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.topicsTable.Cursor(), "j on the consumers tab must not move the topics cursor")
+	assert.Equal(t, 2, m.topicsTable.Cursor(), "j on the consumers tab must not move the topics cursor")
 	assert.Equal(t, 1, m.groupsTable.Cursor(), "j on the consumers tab moves the groups cursor")
 }
 
@@ -653,50 +655,42 @@ func TestRenderAnalyticsViewEmptyL2Sections(t *testing.T) {
 	assert.Contains(t, view, "no data")
 }
 
-func TestJKCyclesPatternsOnAnalyticsTab(t *testing.T) {
+func TestJKScrollsAnalyticsInsteadOfCyclingPatterns(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.ready = true
 	m.activeTab = 5
 	m.patterns = []analytics.ThroughputReport{{Topic: "orders"}, {Topic: "payments"}, {Topic: "audit"}}
-
-	tm, _ := m.Update(key("j"))
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.patternIdx, "j selects the next pattern")
-
-	tm, _ = m.Update(key("j"))
-	m = tm.(*Model)
-	assert.Equal(t, 2, m.patternIdx)
+	m.renderAnalyticsView() // prime the viewport
 
 	tm, _ = m.Update(key("j"))
 	m = tm.(*Model)
-	assert.Equal(t, 0, m.patternIdx, "j wraps around")
+	assert.Equal(t, 0, m.patternIdx, "j scrolls and must not move the pattern selection")
+	assert.Greater(t, m.analyticsView.YOffset, 0, "j scrolls the analytics viewport")
 
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.patternIdx, "down arrow cycles patterns too")
-
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m = tm.(*Model)
-	assert.Equal(t, 0, m.patternIdx, "up arrow cycles patterns back")
+	assert.Greater(t, m.analyticsView.YOffset, 0, "down arrow scrolls too")
 
 	tm, _ = m.Update(key("k"))
 	m = tm.(*Model)
-	assert.Equal(t, 2, m.patternIdx, "k cycles backwards and wraps")
+	assert.Less(t, m.analyticsView.YOffset, 2, "k scrolls back up")
 }
 
-func TestJKWithoutPatternsKeepsAnalyticsSelection(t *testing.T) {
+func TestBracketsCycleAnalyticsSelection(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.ready = true
 	m.activeTab = 5
 	m.analytics = []analytics.GrowthReport{{Topic: "a", Delta: 1}, {Topic: "b", Delta: 2}}
 
-	tm, _ := m.Update(key("j"))
+	tm, _ := m.Update(key("]"))
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.selectedTopic, "no patterns → j keeps cycling the growth selection")
+	assert.Equal(t, 1, m.selectedTopic, "] cycles the growth selection")
 
-	tm, _ = m.Update(key("k"))
+	tm, _ = m.Update(key("["))
 	m = tm.(*Model)
-	assert.Equal(t, 0, m.selectedTopic)
+	assert.Equal(t, 0, m.selectedTopic, "[ cycles back")
 }
 
 // ─── Analyze CLI view ───────────────────────────────────────────────────────
