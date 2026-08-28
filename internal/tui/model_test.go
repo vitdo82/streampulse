@@ -55,6 +55,38 @@ func TestModelViewWithNoData(t *testing.T) {
 	}
 }
 
+// TestOverviewCardsAreNavigationShortcuts asserts the SP-08 rework: no label
+// is duplicated on the Overview, cards advertise the tab-jump key, and broker,
+// group, and alert counts still surface.
+func TestOverviewCardsAreNavigationShortcuts(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(*Model)
+	m.brokers = []BrokerRow{{ID: "b1"}, {ID: "b2"}, {ID: "b3"}}
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}}
+	m.consumerGroups = []ConsumerGroupRow{{Group: "g1"}}
+	m.alerts = []AlertRow{{Name: "lag > 1000"}}
+	m.buildTables()
+
+	view := m.renderOverview()
+
+	// Every label appears exactly once on the Overview screen.
+	for _, label := range []string{"BROKERS", "TOPICS", "CONSUMERS", "CONSUMER GROUPS", "ALERTS", "ACTIVITY LOG"} {
+		assert.Equal(t, 1, strings.Count(view, label), "label %q must not be duplicated", label)
+	}
+
+	// Cards are actionable navigation: each advertises the number-key jump.
+	assert.Contains(t, view, "1: open", "TOPICS card must advertise the jump key")
+	assert.Contains(t, view, "2: open", "CONSUMERS card must advertise the jump key")
+	assert.Contains(t, view, "3: open", "ALERTS card must advertise the jump key")
+
+	// Broker, group, and alert counts still surface.
+	assert.Contains(t, view, "BROKERS (3)", "broker count must surface in the section header")
+	assert.Contains(t, view, "2 topics")
+	assert.Contains(t, view, "1 groups")
+	assert.Contains(t, view, "1 firing")
+}
+
 func TestAlertCardColorDependsOnFiringCount(t *testing.T) {
 	// Force truecolor so styled output emits ANSI sequences we can assert on.
 	prev := lipgloss.ColorProfile()
