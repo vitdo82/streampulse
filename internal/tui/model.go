@@ -1283,6 +1283,15 @@ func (m *Model) renderContent() string {
 	}
 }
 
+// alertCardValueStyle returns the ALERTS summary-card value style. A healthy
+// cluster (nothing firing) reads as calm; only actual firings appear alarming.
+func alertCardValueStyle(healthy bool) lipgloss.Style {
+	if healthy {
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E"))
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444"))
+}
+
 func (m *Model) renderOverview() string {
 	// Summary cards
 	cards := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -1301,7 +1310,7 @@ func (m *Model) renderOverview() string {
 		cardStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("ALERTS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("%d firing", len(m.alerts))),
+				alertCardValueStyle(len(m.alerts) == 0).Render(fmt.Sprintf("%d firing", len(m.alerts))),
 			),
 		),
 	)

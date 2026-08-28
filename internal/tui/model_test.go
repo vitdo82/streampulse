@@ -9,6 +9,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/pulsedev/streampulse/internal/kafka"
 	"github.com/pulsedev/streampulse/internal/scraper"
@@ -51,6 +53,38 @@ func TestModelViewWithNoData(t *testing.T) {
 	if !strings.Contains(view, "BROKERS") {
 		t.Error("overview should contain brokers section")
 	}
+}
+
+func TestAlertCardColorDependsOnFiringCount(t *testing.T) {
+	// Force truecolor so styled output emits ANSI sequences we can assert on.
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := NewModelWithStore(nil)
+	m.width = 120
+	m.height = 40
+	m.ready = true
+	m.buildTables()
+
+	t.Run("no alerts uses success color", func(t *testing.T) {
+		view := m.renderContent()
+		want := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render("0 firing")
+		if !strings.Contains(view, want) {
+			t.Errorf("alert card with 0 firing should use the success color\ngot: %q", view)
+		}
+	})
+
+	t.Run("firing alerts stay red", func(t *testing.T) {
+		m.alerts = []AlertRow{{Name: "lag > 1000", Severity: "critical", Value: "2500.0", FiredAt: "12:00:00"}}
+		defer func() { m.alerts = nil }()
+
+		view := m.renderContent()
+		want := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444")).Render("1 firing")
+		if !strings.Contains(view, want) {
+			t.Errorf("alert card with firing alerts should use red\ngot: %q", view)
+		}
+	})
 }
 
 func TestTabSwitching(t *testing.T) {
