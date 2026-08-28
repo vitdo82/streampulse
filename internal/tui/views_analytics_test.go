@@ -116,26 +116,26 @@ func TestRefreshAnalyticsErrorKeepsLastData(t *testing.T) {
 	assert.Contains(t, view, "▁", "sparkline renders despite the error")
 }
 
-func TestAnalyticsJKCyclesSelection(t *testing.T) {
+func TestAnalyticsBracketsCycleSelection(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.analytics = []analytics.GrowthReport{{Topic: "orders"}, {Topic: "payments"}}
 	m.activeTab = 5
 
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
 	m = tm.(*Model)
 	assert.Equal(t, 1, m.selectedTopic)
 
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
 	m = tm.(*Model)
-	assert.Equal(t, 0, m.selectedTopic, "j wraps past the last topic")
+	assert.Equal(t, 0, m.selectedTopic, "] wraps past the last topic")
 
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[")})
 	m = tm.(*Model)
-	assert.Equal(t, 1, m.selectedTopic, "k wraps past the first topic")
+	assert.Equal(t, 1, m.selectedTopic, "[ wraps past the first topic")
 
-	// j/k on other tabs must not move the analytics selection.
+	// [ / ] on other tabs must not move the analytics selection.
 	m.activeTab = 1
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
 	m = tm.(*Model)
 	assert.Equal(t, 1, m.selectedTopic)
 }

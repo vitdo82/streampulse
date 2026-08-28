@@ -179,6 +179,9 @@ type Model struct {
 	analyzeViewOpen bool
 	analyzeView     *viewport.Model
 
+	// Analytics tab content viewport (scrollable pane stack)
+	analyticsView *viewport.Model
+
 	// Topic tail view (Topics tab, Enter)
 	tailTopic    string
 	tailMessages []tail.Message
@@ -665,6 +668,41 @@ func (m *Model) fetchFromKafka() DataUpdated {
 	return data
 }
 
+// ─── Layout ─────────────────────────────────────────────────────────────────
+
+const (
+	// chromeHeight is the fixed vertical chrome outside the content region:
+	// header bar, tab bar, and footer help bar (one line each).
+	chromeHeight = 3
+	// sectionTitleLines is the rendered height of a padded section heading
+	// (Padding(1, 0) → blank + text + blank).
+	sectionTitleLines = 3
+)
+
+// contentHeight returns the number of lines available for the content region
+// between the tab bar and the footer help bar.
+func (m *Model) contentHeight() int {
+	h := m.height - chromeHeight
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// tableMaxHeight bounds a table to the space left after the fixed chrome and
+// the per-view decorations (section headings, hints) of the tab it renders on.
+// Unbounded (math.MaxInt) while the terminal size is unknown.
+func (m *Model) tableMaxHeight(decor int) int {
+	if m.height <= 0 {
+		return math.MaxInt
+	}
+	h := m.contentHeight() - decor
+	if h < 2 { // header row + at least one data row
+		h = 2
+	}
+	return h
+}
+
 // ─── Update ────────────────────────────────────────────────────────────────
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -679,8 +717,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logView = viewport.New(msg.Width, 6)
 			m.analyzeView = &viewport.Model{}
 			*m.analyzeView = viewport.New(msg.Width-4, msg.Height-6)
-			m.buildTables()
 		}
+		if m.analyticsView == nil {
+			vp := viewport.New(msg.Width, m.contentHeight())
+			m.analyticsView = &vp
+		} else {
+			m.analyticsView.Width = msg.Width
+			m.analyticsView.Height = m.contentHeight()
+		}
+		m.buildTables()
 
 	case tickMsg:
 		if !m.loading {
@@ -759,15 +804,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 		case "j", "down":
 			if m.activeTab == 5 {
-				m.cyclePatternSelection(1)
+				if m.analyticsView != nil {
+					m.analyticsView.LineDown(1)
+				}
 			} else if t := m.activeTable(); t != nil {
 				t.MoveDown(1)
 			}
 		case "k", "up":
 			if m.activeTab == 5 {
-				m.cyclePatternSelection(-1)
+				if m.analyticsView != nil {
+					m.analyticsView.LineUp(1)
+				}
 			} else if t := m.activeTable(); t != nil {
 				t.MoveUp(1)
+			}
+		case "]":
+			if m.activeTab == 5 {
+				m.cyclePatternSelection(1)
+			}
+		case "[":
+			if m.activeTab == 5 {
+				m.cyclePatternSelection(-1)
 			}
 		case "1", "2", "3", "4", "5", "6":
 			if idx := int(msg.Runes[0] - '1'); idx < len(m.tabs) {
@@ -946,6 +1003,16 @@ func (m *Model) applyData(d DataUpdated) {
 }
 
 func (m *Model) buildTables() {
+	// Per-tab vertical budget for the table itself: content region minus the
+	// decorations rendered around it on that tab (headings, hints, blanks).
+	// The groups table renders on both Overview and its own tab; it takes the
+	// dedicated-tab budget so Consumers stays fully reachable.
+	brokersMax := m.tableMaxHeight(2*sectionTitleLines + 18)
+	topicsMax := m.tableMaxHeight(sectionTitleLines + 1) // title + tail hint
+	consumersMax := m.tableMaxHeight(sectionTitleLines)  // title
+	alertsMax := m.tableMaxHeight(sectionTitleLines)     // title
+	dlqMax := m.tableMaxHeight(sectionTitleLines + 2)    // title + blank + hint
+
 	m.brokersTable = buildTable(
 		[]table.Column{
 			{Title: "BROKER", Width: 16},
@@ -955,6 +1022,7 @@ func (m *Model) buildTables() {
 			{Title: "MSGS/S", Width: 12},
 		},
 		rowsFromBrokers(m.brokers),
+		m.brokersTable.Cursor(), brokersMax,
 	)
 
 	m.topicsTable = buildTable(
@@ -966,6 +1034,7 @@ func (m *Model) buildTables() {
 			{Title: "RETENTION", Width: 12},
 		},
 		rowsFromTopics(filteredTopics(m.topics, m.searchQuery)),
+		m.topicsTable.Cursor(), topicsMax,
 	)
 
 	m.groupsTable = buildTable(
@@ -977,6 +1046,7 @@ func (m *Model) buildTables() {
 			{Title: "TOPIC", Width: 14},
 		},
 		rowsFromConsumerGroups(m.consumerGroups),
+		m.groupsTable.Cursor(), consumersMax,
 	)
 
 	m.alertsTable = buildTable(
@@ -987,6 +1057,7 @@ func (m *Model) buildTables() {
 			{Title: "FIRED", Width: 10},
 		},
 		rowsFromAlerts(m.alerts),
+		m.alertsTable.Cursor(), alertsMax,
 	)
 
 	m.dlqTable = buildTable(
@@ -997,17 +1068,29 @@ func (m *Model) buildTables() {
 			{Title: "ERROR PATTERN", Width: 30},
 		},
 		rowsFromDLQ(m.dlqTopics),
+		m.dlqTable.Cursor(), dlqMax,
 	)
 }
 
 // ─── Table Builders ────────────────────────────────────────────────────────
 
-func buildTable(cols []table.Column, rows []table.Row) table.Model {
+// buildTable creates a table whose height is compact (rows + header) but
+// capped at maxHeight; beyond that the table scrolls internally while j/k
+// move the selection. cursor is restored after the rebuild so the live
+// 2-second refresh never resets the operator's selection.
+func buildTable(cols []table.Column, rows []table.Row, cursor, maxHeight int) table.Model {
+	height := len(rows) + 1 // header + data rows
+	if height > maxHeight {
+		height = maxHeight
+	}
+	if height < 1 {
+		height = 1
+	}
 	t := table.New(
 		table.WithColumns(cols),
 		table.WithRows(rows),
 		table.WithFocused(true),
-		table.WithHeight(max(len(rows), 1)+1),
+		table.WithHeight(height),
 	)
 	s := table.DefaultStyles()
 	s.Header = headerStyle
@@ -1015,6 +1098,7 @@ func buildTable(cols []table.Column, rows []table.Row) table.Model {
 		Background(lipgloss.Color("#4C1D95")).
 		Foreground(lipgloss.Color("#FFFFFF"))
 	t.SetStyles(s)
+	t.SetCursor(cursor)
 	return t
 }
 
@@ -1176,6 +1260,7 @@ func (m *Model) renderTabs() string {
 	return lipgloss.NewStyle().
 		Background(lipgloss.Color("#181425")).
 		Width(m.width).
+		MaxHeight(1). // narrow terminals: truncate instead of wrapping into the content region
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, tabs...))
 }
 
@@ -1295,6 +1380,16 @@ func (m *Model) renderDLQView() string {
 }
 
 func (m *Model) renderAnalyticsView() string {
+	content := m.analyticsContent()
+	if m.analyticsView == nil {
+		return content // no window size yet (tests): render unbounded
+	}
+	m.analyticsView.SetContent(content)
+	return m.analyticsView.View()
+}
+
+// analyticsContent renders the six analytics panes as one scrollable body.
+func (m *Model) analyticsContent() string {
 	parts := []string{
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("ANALYTICS"),
 	}
@@ -1529,15 +1624,25 @@ func (m *Model) renderPatternsPane() string {
 	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
+// renderHelp renders the one-line footer. Keys are contextual per tab so the
+// bar never wraps even at the 80-column acceptance width.
 func (m *Model) renderHelp() string {
-	help := "tab/l/r: switch view  │  1-6: jump  │  r: refresh now  │  /: search  │  a: analyze CLI (tab 6)  │  q: quit  │  Auto-refresh: 2s"
-	if m.searching {
-		help = fmt.Sprintf("/ search: %s  │  esc: close", m.searchQuery)
+	help := "tab/l: switch │ 1-6: jump │ r: refresh │ q: quit"
+	switch {
+	case m.searching:
+		help = fmt.Sprintf("/ search: %s │ esc: close", m.searchQuery)
+	case m.activeTab == 1:
+		help = "tab/l: switch │ /: search │ enter: tail topic │ q: quit"
+	case m.activeTab == 4:
+		help = "tab/l: switch │ enter: inspect DLQ topic │ q: quit"
+	case m.activeTab == 5:
+		help = "j/k: scroll │ [/]: cycle topic │ w: window │ a: analyze │ q: quit"
 	}
 	return helpStyle.Render(
 		lipgloss.NewStyle().
 			Background(lipgloss.Color("#1F1A2E")).
 			Width(m.width).
+			MaxHeight(1).
 			Padding(0, 2).
 			Render(help),
 	)

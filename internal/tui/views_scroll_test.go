@@ -1,0 +1,250 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pulsedev/streampulse/internal/analytics"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// sizedModel returns a model sized to the 80x24 acceptance-criteria terminal
+// with n seeded topics.
+func sizedTopicsModel(t *testing.T, n int) *Model {
+	t.Helper()
+	m := NewModelWithStore(nil)
+	topics := make([]TopicRow, n)
+	for i := range topics {
+		topics[i] = TopicRow{Name: topicName(i), Partitions: 3}
+	}
+	m.topics = topics
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(*Model)
+	m.activeTab = 1
+	return m
+}
+
+func topicName(i int) string {
+	return "topic-" + strings.Repeat("x", 2) + string(rune('a'+i%26)) + "-" + itoa(i)
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+func TestTableHeightsBoundedAtSmallTerminal(t *testing.T) {
+	m := sizedTopicsModel(t, 40)
+
+	// Topics budget at 80x24: header+tabs+help (3) + title (3) + hint (1).
+	assert.LessOrEqual(t, m.topicsTable.Height()+1, m.height-7,
+		"topics table must fit the content region")
+
+	m.activeTab = 2
+	m.consumerGroups = make([]ConsumerGroupRow, 40)
+	for i := range m.consumerGroups {
+		m.consumerGroups[i] = ConsumerGroupRow{Group: topicName(i)}
+	}
+	m.buildTables()
+	assert.LessOrEqual(t, m.groupsTable.Height()+1, m.height-6,
+		"consumers table must fit the content region")
+}
+
+func TestJKScrollsBoundedTableToLastRow(t *testing.T) {
+	const n = 40
+	m := sizedTopicsModel(t, n)
+	require.Less(t, m.topicsTable.Height(), n, "precondition: table scrolls")
+
+	last := topicName(n - 1)
+	for i := 0; i < n-1; i++ {
+		tm, _ := m.Update(key("j"))
+		m = tm.(*Model)
+	}
+	assert.Equal(t, n-1, m.topicsTable.Cursor(), "j reaches the last row")
+
+	view := m.renderContent()
+	assert.Contains(t, view, last, "last row scrolled into view")
+
+	for i := 0; i < n-1; i++ {
+		tm, _ := m.Update(key("k"))
+		m = tm.(*Model)
+	}
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "k returns to the first row")
+	assert.Contains(t, m.renderContent(), topicName(0), "first row back in view")
+}
+
+func TestBuildTablesPreservesCursorAcrossRefresh(t *testing.T) {
+	m := sizedTopicsModel(t, 6)
+	tm, _ := m.Update(key("j"))
+	tm, _ = tm.Update(key("j"))
+	m = tm.(*Model)
+	require.Equal(t, 2, m.topicsTable.Cursor())
+
+	// The 2s tick delivers fresh data; tables are rebuilt.
+	tm, _ = m.Update(DataUpdated{Topics: m.topics})
+	m = tm.(*Model)
+
+	assert.Equal(t, 2, m.topicsTable.Cursor(),
+		"refresh must not reset the row selection")
+}
+
+func TestNoFooterOverlapAt80x24(t *testing.T) {
+	cases := []struct {
+		tab   int
+		seed  func(m *Model)
+		label string
+	}{
+		{1, func(m *Model) { m.topics = manyTopics(30) }, "topics"},
+		{2, func(m *Model) {
+			m.consumerGroups = make([]ConsumerGroupRow, 30)
+			for i := range m.consumerGroups {
+				m.consumerGroups[i] = ConsumerGroupRow{Group: topicName(i)}
+			}
+		}, "consumers"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			m := NewModelWithStore(nil)
+			tc.seed(m)
+			tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			m = tm.(*Model)
+			m.activeTab = tc.tab
+
+			view := m.View()
+			lines := strings.Split(view, "\n")
+			assert.Len(t, lines, 24, "view must fill exactly the terminal height")
+			assert.True(t, strings.HasSuffix(strings.TrimRight(lines[len(lines)-1], " "), "q: quit"),
+				"footer help bar must be the last visible line")
+		})
+	}
+}
+
+func TestContextualHelpBar(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 80
+
+	m.activeTab = 5
+	help := m.renderHelp()
+	assert.Contains(t, help, "j/k: scroll")
+	assert.Contains(t, help, "[/]:")
+
+	m.activeTab = 1
+	assert.Contains(t, m.renderHelp(), "enter: tail")
+
+	m.activeTab = 4
+	assert.Contains(t, m.renderHelp(), "enter: inspect")
+
+	m.activeTab = 0
+	assert.NotContains(t, m.renderHelp(), "\n", "help stays a single line")
+}
+
+func manyTopics(n int) []TopicRow {
+	rows := make([]TopicRow, n)
+	for i := range rows {
+		rows[i] = TopicRow{Name: topicName(i), Partitions: 1}
+	}
+	return rows
+}
+func TestAnalyticsScrollsToBottomPanesAt80x24(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.analytics = []analytics.GrowthReport{
+		{Topic: "orders", Delta: 10, Sparkline: "▁▃▅▇█"},
+		{Topic: "payments", Delta: 8, Sparkline: "▁▃▅▇█"},
+	}
+	m.anomalies = []analytics.Anomaly{
+		{Entity: "g1", Metric: "lag", Value: 500, Expected: 100, ZScore: 4.1, Direction: "high", Severity: "critical"},
+	}
+	m.rebalances = make([]analytics.RebalanceReport, 30)
+	for i := range m.rebalances {
+		m.rebalances[i] = analytics.RebalanceReport{Group: topicName(i)}
+	}
+	m.patterns = []analytics.ThroughputReport{{Topic: "orders", Metric: "msg_rate", PeakHour: 9}}
+
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(*Model)
+	m.activeTab = 5
+
+	require.NotNil(t, m.analyticsView, "window size creates the analytics viewport")
+	m.renderAnalyticsView() // prime the viewport with pane content
+	require.False(t, m.analyticsView.AtBottom(), "precondition: content overflows")
+	assert.NotContains(t, m.analyticsView.View(), "REBALANCES",
+		"bottom panes hidden before scrolling")
+	assert.NotContains(t, m.analyticsView.View(), "PATTERNS",
+		"bottom panes hidden before scrolling")
+
+	// Scroll partway: REBALANCES and PATTERNS come into view.
+	for i := 0; i < 30; i++ {
+		tm, _ = m.Update(key("j"))
+		m = tm.(*Model)
+	}
+	assert.Greater(t, m.analyticsView.YOffset, 0, "j scrolls the analytics view")
+	scrolled := m.analyticsView.View()
+	assert.Contains(t, scrolled, "REBALANCES", "rebalances pane reachable via scroll")
+	assert.Contains(t, scrolled, "PATTERNS", "patterns pane reachable via scroll")
+
+	for i := 0; i < 200; i++ {
+		tm, _ = m.Update(key("k"))
+		m = tm.(*Model)
+	}
+	assert.Equal(t, 0, m.analyticsView.YOffset, "k returns to the top")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(*Model)
+	assert.Greater(t, m.analyticsView.YOffset, 0, "down arrow scrolls too")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.analyticsView.YOffset, "up arrow scrolls back")
+}
+
+func TestBracketKeysCycleAnalyticsTopicSelection(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.activeTab = 5
+	m.patterns = []analytics.ThroughputReport{{Topic: "orders"}, {Topic: "payments"}, {Topic: "audit"}}
+
+	tm, _ := m.Update(key("]"))
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.patternIdx, "] selects the next pattern topic")
+
+	tm, _ = m.Update(key("]"))
+	m = tm.(*Model)
+	assert.Equal(t, 2, m.patternIdx)
+
+	tm, _ = m.Update(key("]"))
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.patternIdx, "] wraps around")
+
+	tm, _ = m.Update(key("["))
+	m = tm.(*Model)
+	assert.Equal(t, 2, m.patternIdx, "[ cycles backwards")
+
+	m.patterns = nil
+	m.analytics = []analytics.GrowthReport{{Topic: "a", Delta: 1}, {Topic: "b", Delta: 2}}
+	tm, _ = m.Update(key("]"))
+	m = tm.(*Model)
+	assert.Equal(t, 1, m.selectedTopic, "] falls back to the growth selection")
+	tm, _ = m.Update(key("["))
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.selectedTopic)
+}
+
+func TestAnalyticsViewportResizesOnWindowSizeMsg(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(*Model)
+	require.NotNil(t, m.analyticsView)
+
+	tm, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+	m = tm.(*Model)
+	assert.Equal(t, 120, m.analyticsView.Width, "resize updates viewport width")
+	assert.Equal(t, 47, m.analyticsView.Height, "resize updates viewport height")
+}
