@@ -123,7 +123,6 @@ type DLQRow struct {
 	Topic        string
 	MessageCount string
 	Growth       string
-	ErrorPattern string
 }
 
 // ─── Model ─────────────────────────────────────────────────────────────────
@@ -1062,10 +1061,9 @@ func (m *Model) buildTables() {
 
 	m.dlqTable = buildTable(
 		[]table.Column{
-			{Title: "DLQ TOPIC", Width: 22},
-			{Title: "MESSAGES", Width: 12},
-			{Title: "GROWTH", Width: 10},
-			{Title: "ERROR PATTERN", Width: 30},
+			{Title: "DLQ TOPIC", Width: 44},
+			{Title: "MESSAGES", Width: 16},
+			{Title: "GROWTH", Width: 14},
 		},
 		rowsFromDLQ(m.dlqTopics),
 		m.dlqTable.Cursor(), dlqMax,
@@ -1148,11 +1146,11 @@ func rowsFromAlerts(a []AlertRow) []table.Row {
 
 func rowsFromDLQ(d []DLQRow) []table.Row {
 	if len(d) == 0 {
-		return []table.Row{{"No DLQ topics detected", "-", "-", "-"}}
+		return []table.Row{{"No DLQ topics detected", "-", "-"}}
 	}
 	rows := make([]table.Row, len(d))
 	for i, dlq := range d {
-		rows[i] = table.Row{dlq.Topic, dlq.MessageCount, dlq.Growth, dlq.ErrorPattern}
+		rows[i] = table.Row{dlq.Topic, dlq.MessageCount, dlq.Growth}
 	}
 	return rows
 }
