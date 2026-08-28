@@ -1048,7 +1048,7 @@ func (m *Model) buildTables() {
 	// decorations rendered around it on that tab (headings, hints, blanks).
 	// The groups table renders on both Overview and its own tab; it takes the
 	// dedicated-tab budget so Consumers stays fully reachable.
-	brokersMax := m.tableMaxHeight(2*sectionTitleLines + 18)
+	brokersMax := m.tableMaxHeight(2*sectionTitleLines + 19)
 	topicsMax := m.tableMaxHeight(sectionTitleLines + 2)    // title + tail hint + pagination
 	consumersMax := m.tableMaxHeight(sectionTitleLines + 1) // title + pagination
 	alertsMax := m.tableMaxHeight(sectionTitleLines)        // title
@@ -1342,27 +1342,17 @@ func alertCardValueStyle(healthy bool) lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444"))
 }
 
+// cardValueStyle is the default summary-card value style (white bold).
+var cardValueStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+
 func (m *Model) renderOverview() string {
-	// Summary cards
+	// Summary cards double as navigation shortcuts: each advertises the number
+	// key that jumps to the tab owning that resource. Brokers have no dedicated
+	// tab, so their count lives in the section header instead of a card.
 	cards := lipgloss.JoinHorizontal(lipgloss.Top,
-		cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("BROKERS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(fmt.Sprintf("%d monitored", len(m.brokers))),
-			),
-		),
-		cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("TOPICS"),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(fmt.Sprintf("%d topics", len(m.topics))),
-			),
-		),
-		cardStyle.Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("ALERTS"),
-				alertCardValueStyle(len(m.alerts) == 0).Render(fmt.Sprintf("%d firing", len(m.alerts))),
-			),
-		),
+		m.overviewCard("TOPICS", fmt.Sprintf("%d topics", len(m.topics)), 1, cardValueStyle),
+		m.overviewCard("CONSUMERS", fmt.Sprintf("%d groups", len(m.consumerGroups)), 2, cardValueStyle),
+		m.overviewCard("ALERTS", fmt.Sprintf("%d firing", len(m.alerts)), 3, alertCardValueStyle(len(m.alerts) == 0)),
 	)
 
 	logSection := ""
@@ -1378,7 +1368,7 @@ func (m *Model) renderOverview() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		cards,
 		"",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("BROKERS"),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render(fmt.Sprintf("BROKERS (%d)", len(m.brokers))),
 		m.brokersTable.View(),
 		"",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
@@ -1386,6 +1376,16 @@ func (m *Model) renderOverview() string {
 		"",
 		logSection,
 	)
+}
+
+// overviewCard renders one summary card: label, value, and the number-key
+// shortcut to the tab where that resource's full table lives.
+func (m *Model) overviewCard(label, value string, key int, valueStyle lipgloss.Style) string {
+	return cardStyle.Render(lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(label),
+		valueStyle.Render(value),
+		helpStyle.Render(fmt.Sprintf("%d: open", key)),
+	))
 }
 
 func (m *Model) renderTopicsView() string {
