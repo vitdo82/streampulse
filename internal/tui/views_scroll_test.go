@@ -129,6 +129,23 @@ func TestNoFooterOverlapAt80x24(t *testing.T) {
 	}
 }
 
+// TestSingleAutoRefreshIndicator asserts SP-09 acceptance: the "Auto-refresh"
+// cadence appears exactly once and only in the footer, never in the header.
+func TestSingleAutoRefreshIndicator(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 80
+
+	for tab := 0; tab < 6; tab++ {
+		m.activeTab = tab
+		header := m.renderHeader()
+		footer := m.renderHelp()
+		assert.NotContains(t, header, "Auto-refresh", "tab %d header must not repeat the cadence", tab)
+		assert.Contains(t, footer, "Auto-refresh: "+autoRefreshInterval.String(), "tab %d footer must show the cadence", tab)
+		assert.Equal(t, 1, strings.Count(header+footer, "Auto-refresh"),
+			"tab %d must expose exactly one Auto-refresh indicator", tab)
+	}
+}
+
 func TestContextualHelpBar(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.width = 80
@@ -150,8 +167,10 @@ func TestContextualHelpBar(t *testing.T) {
 }
 
 // TestHelpBarAlwaysShowsGlobalKeysAndNoStaleKeys asserts the footer for every
-// table tab keeps the global keys (1-6 jump, r refresh, ? help, q quit) and
-// never advertises the Analytics-only "a" key (SP-07 acceptance criteria 3).
+// table tab keeps the global keys (1-6 jump, ? help, q quit) and the single
+// auto-refresh indicator, and never advertises the Analytics-only "a" key
+// (SP-07 acceptance criteria 3; SP-09 moved the refresh indicator to the
+// footer and dropped the now-redundant "r: refresh" hint).
 func TestHelpBarAlwaysShowsGlobalKeysAndNoStaleKeys(t *testing.T) {
 	m := NewModelWithStore(nil)
 	m.width = 80
@@ -160,10 +179,11 @@ func TestHelpBarAlwaysShowsGlobalKeysAndNoStaleKeys(t *testing.T) {
 		m.activeTab = tab
 		help := m.renderHelp()
 		assert.Contains(t, help, "1-6: jump", "tab %d must keep the 1-6 global key", tab)
-		assert.Contains(t, help, "r: refresh", "tab %d must keep the r global key", tab)
+		assert.Contains(t, help, "Auto-refresh: 2s", "tab %d must show the auto-refresh cadence", tab)
 		assert.Contains(t, help, "?: help", "tab %d must advertise the ? help modal", tab)
 		assert.Contains(t, help, "q: quit", "tab %d must keep the q global key", tab)
 		assert.NotContains(t, help, "a: analyze", "tab %d must not advertise the analytics-only a key", tab)
+		assert.NotContains(t, help, "\n", "tab %d help stays a single line", tab)
 	}
 }
 

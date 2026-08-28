@@ -263,8 +263,12 @@ func (m *Model) Init() tea.Cmd {
 	)
 }
 
+// autoRefreshInterval is the single source of truth for the refresh cadence:
+// it drives both the tick and the footer indicator (SP-09).
+const autoRefreshInterval = 2 * time.Second
+
 func tickCmd() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(autoRefreshInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -1275,7 +1279,7 @@ func (m *Model) renderHeader() string {
 	if !m.lastUpdated.IsZero() {
 		updated = m.lastUpdated.Format("15:04:05")
 	}
-	status := fmt.Sprintf("Brokers: %d  │  Updated: %s  │  Auto-refresh: 2s",
+	status := fmt.Sprintf("Brokers: %d  │  Updated: %s",
 		brokerCount, updated)
 
 	right := lipgloss.NewStyle().
@@ -1692,10 +1696,11 @@ func (m *Model) renderPatternsPane() string {
 }
 
 // renderHelp renders the one-line footer: the keys relevant to the current
-// view/overlay plus the global keys (1-6 jump, r refresh, ? help, q quit).
-// The full legend lives in the ? modal, so the bar stays short enough not to
-// wrap even at the 80-column acceptance width. Context keys are chosen so the
-// bar never advertises a key that does nothing in the current view.
+// view/overlay plus the auto-refresh cadence and the global keys (1-6 jump,
+// ? help, q quit). The r refresh key and the full legend live in the ? modal,
+// so the bar carries a single refresh indicator (SP-09) and stays short enough
+// not to truncate at the 80-column acceptance width. Context keys are chosen
+// so the bar never advertises a key that does nothing in the current view.
 func (m *Model) renderHelp() string {
 	context := ""
 	switch {
@@ -1705,7 +1710,7 @@ func (m *Model) renderHelp() string {
 				Background(lipgloss.Color("#1F1A2E")).
 				Width(m.width).
 				MaxHeight(1).
-				Padding(0, 2).
+				Padding(0, 1).
 				Render(fmt.Sprintf("/ search: %s — %d of %d (case-insensitive) │ esc: close",
 					m.searchQuery, len(filteredTopics(m.topics, m.searchQuery)), len(m.topics))),
 		)
@@ -1724,13 +1729,14 @@ func (m *Model) renderHelp() string {
 	case m.activeTab == 0:
 		context = "j/k: move │ "
 	}
-	help := context + "1-6: jump │ r: refresh │ ?: help │ q: quit"
+	help := context + "Auto-refresh: " + autoRefreshInterval.String() +
+		" │ 1-6: jump │ ?: help │ q: quit"
 	return helpStyle.Render(
 		lipgloss.NewStyle().
 			Background(lipgloss.Color("#1F1A2E")).
 			Width(m.width).
 			MaxHeight(1).
-			Padding(0, 2).
+			Padding(0, 1).
 			Render(help),
 	)
 }
