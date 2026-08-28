@@ -247,6 +247,77 @@ func key(runes string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(runes)}
 }
 
+// ─── Help modal (? key) ────────────────────────────────────────────────────
+
+func TestHelpModalOpensOnQuestionMark(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.width = 80
+	m.height = 24
+
+	assert.NotContains(t, m.View(), "KEYBINDINGS")
+
+	tm, _ := m.Update(key("?"))
+	m = tm.(*Model)
+	assert.True(t, m.helpOpen, "? must open the help modal")
+	view := m.View()
+	assert.Contains(t, view, "KEYBINDINGS")
+	assert.Contains(t, view, "a", "modal lists the analytics-only a key")
+	assert.Contains(t, view, "p", "modal lists the tail p key")
+}
+
+func TestHelpModalClosesOnEscAndQuitsOnQ(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.width = 80
+	m.height = 24
+
+	tm, _ := m.Update(key("?"))
+	m = tm.(*Model)
+	require.True(t, m.helpOpen)
+
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(*Model)
+	assert.False(t, m.helpOpen, "esc closes the help modal")
+	assert.Nil(t, cmd, "esc must not quit")
+
+	tm, _ = m.Update(key("?"))
+	m = tm.(*Model)
+	require.True(t, m.helpOpen)
+
+	tm, cmd = m.Update(key("q"))
+	m = tm.(*Model)
+	assert.True(t, m.helpOpen, "q must not close the help modal")
+	require.NotNil(t, cmd, "q must quit the app")
+	assert.IsType(t, tea.QuitMsg{}, cmd())
+}
+
+func TestHelpModalDoesNotLeakKeysToUnderlyingView(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.width = 80
+	m.height = 24
+	m.activeTab = 5
+
+	tm, _ := m.Update(key("?"))
+	m = tm.(*Model)
+
+	// "a" while the modal is open must not launch the analyze view.
+	tm, _ = m.Update(key("a"))
+	m = tm.(*Model)
+	assert.True(t, m.helpOpen, "modal stays open")
+	assert.False(t, m.analyzeViewOpen, "a must not leak to the analyze keybinding")
+
+	// modal is reachable from overlays too
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(*Model)
+	m.openTailView("orders")
+	tm, cmd := m.Update(key("?"))
+	m = tm.(*Model)
+	assert.True(t, m.helpOpen, "? works inside the tail overlay")
+	assert.Nil(t, cmd, "opening the modal dispatches no command")
+}
+
 func TestSearchSlashOpensSearchMode(t *testing.T) {
 	m := NewModelWithStore(nil)
 	tm, _ := m.Update(key("/"))

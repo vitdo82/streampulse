@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pulsedev/streampulse/internal/analytics"
 	"github.com/stretchr/testify/assert"
@@ -134,17 +135,55 @@ func TestContextualHelpBar(t *testing.T) {
 
 	m.activeTab = 5
 	help := m.renderHelp()
-	assert.Contains(t, help, "j/k: scroll")
-	assert.Contains(t, help, "[/]:")
+	assert.Contains(t, help, "a: analyze")
+	assert.Contains(t, help, "w: window")
 
 	m.activeTab = 1
 	assert.Contains(t, m.renderHelp(), "enter: tail")
+	assert.Contains(t, m.renderHelp(), "/: search")
 
 	m.activeTab = 4
 	assert.Contains(t, m.renderHelp(), "enter: inspect")
 
 	m.activeTab = 0
 	assert.NotContains(t, m.renderHelp(), "\n", "help stays a single line")
+}
+
+// TestHelpBarAlwaysShowsGlobalKeysAndNoStaleKeys asserts the footer for every
+// table tab keeps the global keys (1-6 jump, r refresh, ? help, q quit) and
+// never advertises the Analytics-only "a" key (SP-07 acceptance criteria 3).
+func TestHelpBarAlwaysShowsGlobalKeysAndNoStaleKeys(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 80
+
+	for tab := 0; tab < 5; tab++ {
+		m.activeTab = tab
+		help := m.renderHelp()
+		assert.Contains(t, help, "1-6: jump", "tab %d must keep the 1-6 global key", tab)
+		assert.Contains(t, help, "r: refresh", "tab %d must keep the r global key", tab)
+		assert.Contains(t, help, "?: help", "tab %d must advertise the ? help modal", tab)
+		assert.Contains(t, help, "q: quit", "tab %d must keep the q global key", tab)
+		assert.NotContains(t, help, "a: analyze", "tab %d must not advertise the analytics-only a key", tab)
+	}
+}
+
+// TestHelpBarFollowsOverlay asserts the footer switches to the active overlay's
+// keys (tail, DLQ inspect) and drops the tab-list keys (SP-07 criterion 1).
+func TestHelpBarFollowsOverlay(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.activeTab = 1
+
+	m.openTailView("orders")
+	help := m.renderHelp()
+	assert.Contains(t, help, "p: pause/resume")
+	assert.Contains(t, help, "esc: back")
+	assert.NotContains(t, help, "/: search", "tail overlay must not advertise the topics table search")
+	m.closeTailView()
+
+	m.dlqView = &viewport.Model{}
+	help = m.renderHelp()
+	assert.Contains(t, help, "r: replay")
+	assert.NotContains(t, help, "enter: inspect", "DLQ inspect overlay must not advertise the DLQ list enter key")
 }
 
 // ─── Pagination (Showing N of M + PgUp/PgDn) ───────────────────────────────
