@@ -31,8 +31,7 @@ type dlqReplayMsg struct {
 
 // fetchDLQ discovers dead-letter topics through the kafka client and maps
 // them into dashboard rows. Growth renders as "-" when the discovery did not
-// produce a rate; the error pattern comes from message headers, which is not
-// read here (no cheap source), so it renders as "-".
+// produce a rate.
 func (m *Model) fetchDLQ(ctx context.Context) ([]DLQRow, error) {
 	if m.kafkaClient == nil {
 		return nil, nil
@@ -47,7 +46,7 @@ func (m *Model) fetchDLQ(ctx context.Context) ([]DLQRow, error) {
 	}
 	rows := make([]DLQRow, 0, len(topics))
 	for _, t := range topics {
-		row := DLQRow{Topic: t.Name, MessageCount: strconv.FormatInt(t.MessageCount, 10), ErrorPattern: "-"}
+		row := DLQRow{Topic: t.Name, MessageCount: strconv.FormatInt(t.MessageCount, 10)}
 		if t.GrowthRate == 0 {
 			row.Growth = "-"
 		} else {

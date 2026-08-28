@@ -34,11 +34,24 @@ func TestFetchDLQPopulatesRows(t *testing.T) {
 	assert.Equal(t, "payments.dlq", rows[0].Topic)
 	assert.Equal(t, "42", rows[0].MessageCount)
 	assert.Equal(t, "-", rows[0].Growth, "zero growth rate renders as dash")
-	assert.Equal(t, "-", rows[0].ErrorPattern, "no cheap error pattern source -> dash")
 
 	assert.Equal(t, "orders.error", rows[1].Topic)
 	assert.Equal(t, "7", rows[1].MessageCount)
 	assert.Equal(t, "3.5", rows[1].Growth, "non-zero growth rate is shown")
+}
+
+func TestDLQTableHasNoErrorPatternColumn(t *testing.T) {
+	m := NewModelWithKafka(kafka.NewClient([]string{"127.0.0.1:1"}))
+	m.ready = true
+	m.dlqTopics = []DLQRow{{Topic: "payments.dlq", MessageCount: "42", Growth: "3.5"}}
+	m.buildTables()
+	m.activeTab = 4
+
+	view := m.renderContent()
+	assert.Contains(t, view, "DLQ TOPIC")
+	assert.Contains(t, view, "MESSAGES")
+	assert.Contains(t, view, "GROWTH")
+	assert.NotContains(t, view, "ERROR PATTERN", "dead ERROR PATTERN column is removed")
 }
 
 func TestFetchDLQDiscoveryError(t *testing.T) {
