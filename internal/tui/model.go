@@ -817,6 +817,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if t := m.activeTable(); t != nil {
 				t.MoveUp(1)
 			}
+		case "pgup":
+			if t := m.activeTable(); t != nil {
+				t.MoveUp(pageSize(t))
+			}
+		case "pgdown":
+			if t := m.activeTable(); t != nil {
+				t.MoveDown(pageSize(t))
+			}
 		case "]":
 			if m.activeTab == 5 {
 				m.cyclePatternSelection(1)
@@ -986,6 +994,16 @@ func (m *Model) activeTable() *table.Model {
 	return nil
 }
 
+// pageSize returns the number of rows a PgUp/PgDn page spans: one full screen
+// of the table's visible viewport, never fewer than one row.
+func pageSize(t *table.Model) int {
+	h := t.Height() // viewport height = rendered height minus the header row
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (m *Model) applyData(d DataUpdated) {
 	if !d.Failed {
 		m.brokers = d.Brokers
@@ -1007,10 +1025,10 @@ func (m *Model) buildTables() {
 	// The groups table renders on both Overview and its own tab; it takes the
 	// dedicated-tab budget so Consumers stays fully reachable.
 	brokersMax := m.tableMaxHeight(2*sectionTitleLines + 18)
-	topicsMax := m.tableMaxHeight(sectionTitleLines + 1) // title + tail hint
-	consumersMax := m.tableMaxHeight(sectionTitleLines)  // title
-	alertsMax := m.tableMaxHeight(sectionTitleLines)     // title
-	dlqMax := m.tableMaxHeight(sectionTitleLines + 2)    // title + blank + hint
+	topicsMax := m.tableMaxHeight(sectionTitleLines + 2)    // title + tail hint + pagination
+	consumersMax := m.tableMaxHeight(sectionTitleLines + 1) // title + pagination
+	alertsMax := m.tableMaxHeight(sectionTitleLines)        // title
+	dlqMax := m.tableMaxHeight(sectionTitleLines + 2)       // title + blank + hint
 
 	m.brokersTable = buildTable(
 		[]table.Column{
@@ -1343,6 +1361,7 @@ func (m *Model) renderTopicsView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("TOPICS"),
 		m.topicsTable.View(),
+		m.renderPagination(len(filteredTopics(m.topics, m.searchQuery)), len(m.topics)),
 		helpStyle.Render("  ENTER: tail topic"),
 	)
 }
@@ -1351,7 +1370,14 @@ func (m *Model) renderConsumersView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("CONSUMER GROUPS"),
 		m.groupsTable.View(),
+		m.renderPagination(len(m.consumerGroups), len(m.consumerGroups)),
 	)
+}
+
+// renderPagination renders the "Showing N of M" row-count indicator under a
+// table, where N is the visible (post-filter) row count and M the total.
+func (m *Model) renderPagination(visible, total int) string {
+	return helpStyle.Render(fmt.Sprintf("  Showing %d of %d", visible, total))
 }
 
 func (m *Model) renderAlertsView() string {
@@ -1639,7 +1665,9 @@ func (m *Model) renderHelp() string {
 	case m.searching:
 		help = fmt.Sprintf("/ search: %s │ esc: close", m.searchQuery)
 	case m.activeTab == 1:
-		help = "tab/l: switch │ /: search │ enter: tail topic │ q: quit"
+		help = "tab/l: switch │ /: search │ enter: tail topic │ pgup/pgdn: page │ q: quit"
+	case m.activeTab == 2:
+		help = "tab/l: switch │ pgup/pgdn: page │ q: quit"
 	case m.activeTab == 4:
 		help = "tab/l: switch │ enter: inspect DLQ topic │ q: quit"
 	case m.activeTab == 5:
