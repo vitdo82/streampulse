@@ -147,6 +147,83 @@ func TestContextualHelpBar(t *testing.T) {
 	assert.NotContains(t, m.renderHelp(), "\n", "help stays a single line")
 }
 
+// ─── Pagination (Showing N of M + PgUp/PgDn) ───────────────────────────────
+
+func TestPgUpPgDownPagesThroughLargeList(t *testing.T) {
+	const n = 40
+	m := sizedTopicsModel(t, n)
+	page := m.topicsTable.Height()
+	require.Greater(t, page, 0, "precondition: table has a visible page size")
+	require.Less(t, page, n, "precondition: table scrolls")
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = tm.(*Model)
+	assert.Equal(t, page, m.topicsTable.Cursor(), "pgdown pages one screen down")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = tm.(*Model)
+	assert.Equal(t, 2*page, m.topicsTable.Cursor(), "second pgdown pages again")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = tm.(*Model)
+	assert.Equal(t, page, m.topicsTable.Cursor(), "pgup pages one screen up")
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = tm.(*Model)
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "pgup returns to the top")
+}
+
+func TestPgDownClampsAtLastRow(t *testing.T) {
+	m := sizedTopicsModel(t, 40)
+	m.topicsTable.GotoBottom()
+	last := m.topicsTable.Cursor()
+
+	for i := 0; i < 5; i++ {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		m = tm.(*Model)
+	}
+	assert.Equal(t, last, m.topicsTable.Cursor(), "pgdown clamps at the last row")
+
+	m.topicsTable.GotoTop()
+	for i := 0; i < 5; i++ {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		m = tm.(*Model)
+	}
+	assert.Equal(t, 0, m.topicsTable.Cursor(), "pgup clamps at the first row")
+}
+
+func TestTopicsViewShowsPaginationIndicator(t *testing.T) {
+	m := sizedTopicsModel(t, 30)
+
+	view := m.renderContent()
+	assert.Contains(t, view, "Showing 30 of 30")
+}
+
+func TestConsumersViewShowsPaginationIndicator(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.consumerGroups = make([]ConsumerGroupRow, 30)
+	for i := range m.consumerGroups {
+		m.consumerGroups[i] = ConsumerGroupRow{Group: topicName(i)}
+	}
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(*Model)
+	m.activeTab = 2
+
+	view := m.renderContent()
+	assert.Contains(t, view, "Showing 30 of 30")
+}
+
+func TestPaginationIndicatorCountsFilteredTopics(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}, {Name: "orders.dlq"}, {Name: "audit"}}
+	m.searchQuery = "order"
+	m.activeTab = 1
+	m.buildTables()
+
+	view := m.renderContent()
+	assert.Contains(t, view, "Showing 2 of 4", "filtered count must update after search")
+}
+
 func manyTopics(n int) []TopicRow {
 	rows := make([]TopicRow, n)
 	for i := range rows {
