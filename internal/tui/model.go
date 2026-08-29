@@ -45,7 +45,7 @@ var (
 
 	tabStyle = lipgloss.NewStyle().
 			Padding(0, 2).
-			Foreground(lipgloss.Color("#6B7280"))
+			Foreground(lipgloss.Color("#9CA3AF"))
 
 	activeTabStyle = lipgloss.NewStyle().
 			Padding(0, 2).
@@ -53,7 +53,7 @@ var (
 			Background(lipgloss.Color("#7C3AED")).
 			Bold(true)
 
-	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
 
 	cardStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -236,7 +236,7 @@ func NewModel(storePath string) (*Model, error) {
 
 	m := &Model{
 		store: store,
-		tabs:  []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		tabs:  []string{"▦ Overview", "▤ Topics", "▣ Consumers", "▲ Alerts", "▬ DLQ", "▨ Analytics"},
 	}
 
 	return m, nil
@@ -246,7 +246,7 @@ func NewModel(storePath string) (*Model, error) {
 func NewModelWithStore(store storage.MetricsStore) *Model {
 	return &Model{
 		store: store,
-		tabs:  []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		tabs:  []string{"▦ Overview", "▤ Topics", "▣ Consumers", "▲ Alerts", "▬ DLQ", "▨ Analytics"},
 	}
 }
 
@@ -255,7 +255,7 @@ func NewModelWithKafka(client *kafka.Client) *Model {
 	return &Model{
 		kafkaClient: client,
 		brokerAddrs: client.Brokers(),
-		tabs:        []string{"📊 Overview", "📨 Topics", "👥 Consumers", "🔔 Alerts", "📂 DLQ", "📈 Analytics"},
+		tabs:        []string{"▦ Overview", "▤ Topics", "▣ Consumers", "▲ Alerts", "▬ DLQ", "▨ Analytics"},
 	}
 }
 
@@ -1259,7 +1259,7 @@ func (m *Model) View() string {
 func (m *Model) renderAnalyzeView() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).
 		Padding(1, 2).
-		Render(fmt.Sprintf("⚡ analyze --window %s", m.analyzeWindow))
+		Render(fmt.Sprintf("▶ analyze --window %s", m.analyzeWindow))
 
 	body := "running..."
 	if m.analyzeView != nil {
@@ -1277,7 +1277,7 @@ func (m *Model) renderAnalyzeView() string {
 }
 
 func (m *Model) renderHeader() string {
-	left := titleStyle.Render("⚡ StreamPulse v0.1.0")
+	left := titleStyle.Render("▶ StreamPulse v0.1.0")
 
 	brokerCount := len(m.brokers)
 	if brokerCount == 0 {
@@ -1291,7 +1291,7 @@ func (m *Model) renderHeader() string {
 		brokerCount, updated)
 
 	right := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6B7280")).
+		Foreground(lipgloss.Color("#9CA3AF")).
 		Render(status)
 
 	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
@@ -1334,7 +1334,7 @@ func (m *Model) renderFailureBanner() string {
 		return ""
 	}
 	return failureBannerStyle.Width(m.width).
-		Render("⚠  last scrape failed — data may be stale (details in activity log)")
+		Render("!  last scrape failed — data may be stale (details in activity log)")
 }
 
 func (m *Model) renderContent() string {
@@ -1409,7 +1409,7 @@ func (m *Model) renderOverview() string {
 // shortcut to the tab where that resource's full table lives.
 func (m *Model) overviewCard(label, value string, key int, valueStyle lipgloss.Style) string {
 	return cardStyle.Render(lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(label),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(label),
 		valueStyle.Render(value),
 		helpStyle.Render(fmt.Sprintf("%d: open", key)),
 	))
@@ -1462,14 +1462,14 @@ func (m *Model) renderDLQView() string {
 			prompt,
 			m.dlqView.View(),
 			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  esc: back  │  r: replay  │  y/n: confirm  │  j/k: scroll"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("  esc: back  │  r: replay  │  y/n: confirm  │  j/k: scroll"),
 		)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES"),
 		m.dlqTable.View(),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("  ENTER: inspect  │  R: replay"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("  ENTER: inspect  │  R: replay"),
 	)
 }
 
@@ -1515,7 +1515,7 @@ func (m *Model) renderGrowthPane() string {
 		Bold(true).
 		Foreground(lipgloss.Color("#A78BFA")).
 		Padding(1, 0).
-		Render(fmt.Sprintf("📈 TOPIC GROWTH (%dh)", int(analyticsWindow/time.Hour)))
+		Render(fmt.Sprintf("▇ TOPIC GROWTH (%dh)", int(analyticsWindow/time.Hour)))
 
 	width := m.width - 4
 	if width < 10 {
@@ -1541,7 +1541,7 @@ func (m *Model) renderGrowthPane() string {
 	lines := make([]string, 0, len(m.analytics))
 	for i, g := range m.analytics {
 		marker := "  "
-		name := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(g.Topic)
+		name := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(g.Topic)
 		if i == sel {
 			marker = "▸ "
 			name = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(g.Topic)
@@ -1613,7 +1613,7 @@ func (m *Model) renderRetentionPane() string {
 		}
 		lines = append(lines, lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FBBF24")).
-			Render(fmt.Sprintf("  ⚠ %s: retention %s, fill estimate %.1f days — at risk",
+			Render(fmt.Sprintf("  ! %s: retention %s, fill estimate %.1f days — at risk",
 				r.Topic, r.RetentionMS, r.EstimateFillDays)))
 	}
 	if len(lines) == 0 {

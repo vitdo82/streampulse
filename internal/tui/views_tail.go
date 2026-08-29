@@ -241,7 +241,7 @@ func (m *Model) renderTailView() string {
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).
 		Padding(1, 0).
-		Render(fmt.Sprintf("📨 TAIL %s — %s%s", m.tailTopic, status, summary))
+		Render(fmt.Sprintf("▬ TAIL %s — %s%s", m.tailTopic, status, summary))
 
 	body := "no messages"
 	if m.tailView != nil {
