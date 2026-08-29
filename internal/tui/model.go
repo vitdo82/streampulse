@@ -1488,7 +1488,7 @@ func (m *Model) renderDLQView() string {
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).Padding(1, 0).Render("DEAD LETTER QUEUES"),
 		m.dlqTable.View(),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("  ENTER: inspect  │  R: replay"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("  ENTER: inspect  │  r: replay"),
 	)
 }
 
