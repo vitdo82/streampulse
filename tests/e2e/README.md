@@ -53,7 +53,7 @@ vhs tests/e2e/vhs/02-topics-search.tape
 | `02-topics-search.tape` | Topics tab + `/` search "orders" | `TOPICS`, `orders`, filtered list |
 | `03-topic-tail.tape` | Enter on a topic → tail view, `p` pause | `TAIL orders`, `following`/`paused`, `[p 0\|o` message lines |
 | `04-dlq.tape` | DLQ tab + Enter inspect | `payments.dlq`, `DEAD LETTER QUEUES`, inspect payloads |
-| `05-analytics.tape` | Analytics tab + `a` analyze CLI view | `ANALYTICS`, `analyze --window`, `no data` |
+| `05-analytics.tape` | Analytics tab + `a` analyze CLI view | `ANALYTICS`, `analyze --window`, `No growth detected` |
 | `06-overlay-q-quit.tape` | `q` in the tail overlay quits the app | `Q_QUIT_OK` (sentinel printed after quit) |
 | `07-scrollable-content.tape` | Small (80x24) terminal; Topics + Analytics scroll | `TOPICS`, `ANALYTICS`, `REBALANCES`, `PATTERNS` |
 | `08-pagination.tape` | Large table + `pgup`/`pgdn` | `Showing`, `PAGINATION_OK` |

@@ -464,6 +464,13 @@ const (
 	analyticsWindow = 7 * 24 * time.Hour
 	// analyticsTopN caps the growth list shown on the Analytics tab.
 	analyticsTopN = 5
+	// Uniform empty-state phrasing for the analytics panes (SP-14).
+	emptyGrowth     = "No growth detected"
+	emptySkew       = "No skew detected"
+	emptyRetention  = "No retention risk detected"
+	emptyAnomalies  = "No anomalies detected"
+	emptyRebalances = "No rebalances in window"
+	emptyPatterns   = "No patterns detected"
 )
 
 // refreshAnalytics recomputes the analytics cache when it is older than
@@ -1542,7 +1549,7 @@ func (m *Model) renderGrowthPane() string {
 	if len(m.analytics) == 0 {
 		return lipgloss.JoinVertical(lipgloss.Left,
 			title,
-			box.Render(helpStyle.Render("no data")),
+			box.Render(helpStyle.Render(emptyGrowth)),
 		)
 	}
 
@@ -1584,7 +1591,7 @@ func (m *Model) renderSkewPane() string {
 		Render("PARTITION SKEW")
 
 	if len(m.skew) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  "+emptySkew))
 	}
 
 	var lines []string
@@ -1616,7 +1623,7 @@ func (m *Model) renderRetentionPane() string {
 		Render("RETENTION")
 
 	if len(m.retention) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  "+emptyRetention))
 	}
 	lines := make([]string, 0, len(m.retention))
 	for _, r := range m.retention {
@@ -1629,7 +1636,7 @@ func (m *Model) renderRetentionPane() string {
 				r.Topic, r.RetentionMS, r.EstimateFillDays)))
 	}
 	if len(lines) == 0 {
-		lines = append(lines, helpStyle.Render("  all topics within retention"))
+		lines = append(lines, helpStyle.Render("  "+emptyRetention))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, title, lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
@@ -1645,7 +1652,7 @@ func (m *Model) renderAnomaliesPane() string {
 		Render("ANOMALIES")
 
 	if len(m.anomalies) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no anomaly data"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  "+emptyAnomalies))
 	}
 
 	sorted := append([]analytics.Anomaly(nil), m.anomalies...)
@@ -1680,7 +1687,7 @@ func (m *Model) renderRebalancesPane() string {
 		Render("REBALANCES")
 
 	if len(m.rebalances) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no rebalance data"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  "+emptyRebalances))
 	}
 
 	rows := m.rebalances
@@ -1707,7 +1714,7 @@ func (m *Model) renderPatternsPane() string {
 		Render("PATTERNS")
 
 	if len(m.patterns) == 0 {
-		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  no data"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, helpStyle.Render("  "+emptyPatterns))
 	}
 
 	p := m.patterns[m.patternIdx%len(m.patterns)]
