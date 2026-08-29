@@ -878,9 +878,12 @@ func TestRenderAnalyticsViewEmptyL2Sections(t *testing.T) {
 	m.width = 120
 
 	view := m.renderAnalyticsView()
-	assert.Contains(t, view, "no anomaly data")
-	assert.Contains(t, view, "no rebalance data")
-	assert.Contains(t, view, "no data")
+	assert.Contains(t, view, "No anomalies detected")
+	assert.Contains(t, view, "No rebalances in window")
+	assert.Contains(t, view, "No growth detected")
+	assert.Contains(t, view, "No skew detected")
+	assert.Contains(t, view, "No retention risk detected")
+	assert.Contains(t, view, "No patterns detected")
 }
 
 func TestJKScrollsAnalyticsInsteadOfCyclingPatterns(t *testing.T) {

@@ -147,7 +147,9 @@ func TestAnalyticsViewNoData(t *testing.T) {
 	m.activeTab = 5
 
 	view := m.renderAnalyticsView()
-	assert.Contains(t, view, "no data")
+	assert.Contains(t, view, "No growth detected")
+	assert.Contains(t, view, "No anomalies detected")
+	assert.Contains(t, view, "No rebalances in window")
 }
 
 func TestAnalyticsViewRendersGrowthSparkline(t *testing.T) {
