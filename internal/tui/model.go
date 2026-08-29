@@ -60,6 +60,12 @@ var (
 			BorderForeground(lipgloss.Color("#4C1D95")).
 			Padding(1, 2).
 			Width(28)
+
+	failureBannerStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(lipgloss.Color("#DC2626")).
+				Padding(0, 1)
 )
 
 // ─── Messages ──────────────────────────────────────────────────────────────
@@ -149,8 +155,9 @@ type Model struct {
 	dlqTopics      []DLQRow
 	logs           []string
 
-	lastUpdated time.Time
-	loading     bool
+	lastUpdated  time.Time
+	loading      bool
+	scrapeFailed bool
 
 	// Topic search (active while searching)
 	searching   bool
@@ -1033,6 +1040,7 @@ func pageSize(t *table.Model) int {
 }
 
 func (m *Model) applyData(d DataUpdated) {
+	m.scrapeFailed = d.Failed
 	if !d.Failed {
 		m.brokers = d.Brokers
 		m.topics = d.Topics
@@ -1318,23 +1326,38 @@ func (m *Model) renderTabs() string {
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, tabs...))
 }
 
-func (m *Model) renderContent() string {
-	switch m.activeTab {
-	case 0:
-		return m.renderOverview()
-	case 1:
-		return m.renderTopicsView()
-	case 2:
-		return m.renderConsumersView()
-	case 3:
-		return m.renderAlertsView()
-	case 4:
-		return m.renderDLQView()
-	case 5:
-		return m.renderAnalyticsView()
-	default:
+// renderFailureBanner renders the red "last scrape failed" warning at the top
+// of the content region. It shows whenever the last refresh failed and clears
+// on the next successful refresh (SP-11).
+func (m *Model) renderFailureBanner() string {
+	if !m.scrapeFailed {
 		return ""
 	}
+	return failureBannerStyle.Width(m.width).
+		Render("⚠  last scrape failed — data may be stale (details in activity log)")
+}
+
+func (m *Model) renderContent() string {
+	var body string
+	switch m.activeTab {
+	case 0:
+		body = m.renderOverview()
+	case 1:
+		body = m.renderTopicsView()
+	case 2:
+		body = m.renderConsumersView()
+	case 3:
+		body = m.renderAlertsView()
+	case 4:
+		body = m.renderDLQView()
+	case 5:
+		body = m.renderAnalyticsView()
+	}
+
+	if banner := m.renderFailureBanner(); banner != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, banner, body)
+	}
+	return body
 }
 
 // alertCardValueStyle returns the ALERTS summary-card value style. A healthy
