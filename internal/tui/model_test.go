@@ -67,6 +67,7 @@ func TestOverviewCardsAreNavigationShortcuts(t *testing.T) {
 	m.topics = []TopicRow{{Name: "orders"}, {Name: "payments"}}
 	m.consumerGroups = []ConsumerGroupRow{{Group: "g1"}}
 	m.alerts = []AlertRow{{Name: "lag > 1000"}}
+	m.scrapedOnce = true
 	m.buildTables()
 
 	view := m.renderOverview()
@@ -88,6 +89,52 @@ func TestOverviewCardsAreNavigationShortcuts(t *testing.T) {
 	assert.Contains(t, view, "1 firing")
 }
 
+// TestOverviewCardsLoadingBeforeFirstScrape asserts SP-13: before the first
+// successful scrape the summary cards show a loading placeholder rather than
+// "0", so an empty cluster reads differently from a still-connecting one.
+func TestOverviewCardsLoadingBeforeFirstScrape(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(*Model)
+
+	view := m.renderOverview()
+	assert.Contains(t, view, "loading…", "cards must show a loading placeholder before the first scrape")
+	assert.NotContains(t, view, "0 topics", "cards must not claim 0 before the first scrape")
+	assert.NotContains(t, view, "0 groups")
+	assert.NotContains(t, view, "0 firing")
+}
+
+// TestOverviewCardsResolveAfterFirstScrape asserts SP-13 acceptance: the
+// loading placeholder resolves to real counts once the first successful
+// scrape populates the cards.
+func TestOverviewCardsResolveAfterFirstScrape(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(*Model)
+
+	tm, _ = m.Update(DataUpdated{Topics: []TopicRow{{Name: "orders"}}})
+	m = tm.(*Model)
+
+	view := m.renderOverview()
+	assert.NotContains(t, view, "loading…", "loading placeholder must clear after the first successful scrape")
+	assert.Contains(t, view, "1 topics", "card must show the real count after the first scrape")
+}
+
+// TestOverviewCardsStayLoadingWhenFirstScrapeFails asserts a failed first
+// scrape keeps the loading placeholder: "loading" must not resolve to "0"
+// because the cards were never populated.
+func TestOverviewCardsStayLoadingWhenFirstScrapeFails(t *testing.T) {
+	m := NewModelWithStore(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = tm.(*Model)
+
+	tm, _ = m.Update(DataUpdated{Failed: true})
+	m = tm.(*Model)
+
+	view := m.renderOverview()
+	assert.Contains(t, view, "loading…", "a failed first scrape must not resolve the cards to 0")
+}
+
 func TestAlertCardColorDependsOnFiringCount(t *testing.T) {
 	// Force truecolor so styled output emits ANSI sequences we can assert on.
 	prev := lipgloss.ColorProfile()
@@ -98,6 +145,7 @@ func TestAlertCardColorDependsOnFiringCount(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.ready = true
+	m.scrapedOnce = true
 	m.buildTables()
 
 	t.Run("no alerts uses success color", func(t *testing.T) {

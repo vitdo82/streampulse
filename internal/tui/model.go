@@ -157,6 +157,7 @@ type Model struct {
 
 	lastUpdated  time.Time
 	loading      bool
+	scrapedOnce  bool
 	scrapeFailed bool
 
 	// Topic search (active while searching)
@@ -1042,6 +1043,7 @@ func pageSize(t *table.Model) int {
 func (m *Model) applyData(d DataUpdated) {
 	m.scrapeFailed = d.Failed
 	if !d.Failed {
+		m.scrapedOnce = true
 		m.brokers = d.Brokers
 		m.topics = d.Topics
 		m.consumerGroups = d.ConsumerGroups
@@ -1377,9 +1379,9 @@ func (m *Model) renderOverview() string {
 	// key that jumps to the tab owning that resource. Brokers have no dedicated
 	// tab, so their count lives in the section header instead of a card.
 	cards := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.overviewCard("TOPICS", fmt.Sprintf("%d topics", len(m.topics)), 1, cardValueStyle),
-		m.overviewCard("CONSUMERS", fmt.Sprintf("%d groups", len(m.consumerGroups)), 2, cardValueStyle),
-		m.overviewCard("ALERTS", fmt.Sprintf("%d firing", len(m.alerts)), 3, alertCardValueStyle(len(m.alerts) == 0)),
+		m.overviewCard("TOPICS", m.summaryValue(len(m.topics), "topics"), 1, cardValueStyle),
+		m.overviewCard("CONSUMERS", m.summaryValue(len(m.consumerGroups), "groups"), 2, cardValueStyle),
+		m.overviewCard("ALERTS", m.summaryValue(len(m.alerts), "firing"), 3, alertCardValueStyle(len(m.alerts) == 0)),
 	)
 
 	logSection := ""
@@ -1403,6 +1405,16 @@ func (m *Model) renderOverview() string {
 		"",
 		logSection,
 	)
+}
+
+// summaryValue renders a resource count for a summary card, showing a loading
+// placeholder until the first successful scrape distinguishes an empty cluster
+// from one still connecting (SP-13).
+func (m *Model) summaryValue(n int, unit string) string {
+	if !m.scrapedOnce {
+		return "loading…"
+	}
+	return fmt.Sprintf("%d %s", n, unit)
 }
 
 // overviewCard renders one summary card: label, value, and the number-key
