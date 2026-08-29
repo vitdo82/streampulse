@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,48 @@ func TestFailedFetchDoesNotStampLastUpdated(t *testing.T) {
 	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] kafka error"}})
 	if !m.lastUpdated.Equal(before) {
 		t.Errorf("failed fetch must not change lastUpdated: before=%v after=%v", before, m.lastUpdated)
+	}
+}
+
+// TestFailureBannerShowsOnFailedScrape asserts SP-11 acceptance: a banner
+// appears when the last scrape failed and clears on the next success.
+func TestFailureBannerShowsOnFailedScrape(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 80
+	m.ready = true
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}})
+
+	if b := m.renderFailureBanner(); b != "" {
+		t.Errorf("banner must be empty while healthy, got %q", b)
+	}
+
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] store offline: boom"}})
+	banner := m.renderFailureBanner()
+	if !strings.Contains(banner, "last scrape failed") {
+		t.Errorf("failed scrape must show the failure banner, got %q", banner)
+	}
+
+	m.applyData(DataUpdated{Brokers: []BrokerRow{{ID: "b1"}}})
+	if b := m.renderFailureBanner(); b != "" {
+		t.Errorf("banner must clear on successful scrape, got %q", b)
+	}
+}
+
+// TestFailureBannerVisibleOnEveryTab asserts the failure banner renders at the
+// top of the content region on every tab (SP-11 acceptance criterion 2).
+func TestFailureBannerVisibleOnEveryTab(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.width = 80
+	m.ready = true
+	m.applyData(DataUpdated{Failed: true, Logs: []string{"[00:00:02] store offline"}})
+
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	for tab := 0; tab < 6; tab++ {
+		m.activeTab = tab
+		content := ansi.ReplaceAllString(m.renderContent(), "")
+		lines := strings.Split(content, "\n")
+		assert.Contains(t, lines[0], "last scrape failed",
+			"tab %d banner must be the first line of the content region", tab)
 	}
 }
 
