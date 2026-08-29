@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -224,9 +225,23 @@ func (m *Model) renderTailView() string {
 	if m.tailPaused {
 		status = "paused"
 	}
+
+	summary := ""
+	if n := len(m.tailMessages); n > 0 {
+		summary = fmt.Sprintf(" │ %d msgs │ last %s", n, m.tailMessages[n-1].Timestamp.UTC().Format("15:04:05.000"))
+	}
+	if offs := m.tailOffsets; len(offs) > 0 {
+		parts := make([]string, 0, len(offs))
+		for p, o := range offs {
+			parts = append(parts, fmt.Sprintf("p%d→%d", p, o))
+		}
+		sort.Strings(parts)
+		summary += " │ " + strings.Join(parts, " ")
+	}
+
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA")).
 		Padding(1, 0).
-		Render(fmt.Sprintf("📨 TAIL %s — %s", m.tailTopic, status))
+		Render(fmt.Sprintf("📨 TAIL %s — %s%s", m.tailTopic, status, summary))
 
 	body := "no messages"
 	if m.tailView != nil {

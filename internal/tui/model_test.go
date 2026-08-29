@@ -1126,3 +1126,34 @@ func TestRenderTailView(t *testing.T) {
 	assert.Contains(t, view, "esc: close")
 	assert.NotContains(t, view, "esc/q: close", "help must not advertise q as close")
 }
+
+func TestRenderTailViewEnrichedHeader(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	ts := time.Date(2026, 8, 12, 12, 3, 4, 567000000, time.UTC)
+	m.tailMessages = []tail.Message{
+		{Topic: "orders", Partition: 0, Offset: 10, Timestamp: ts},
+		{Topic: "orders", Partition: 1, Offset: 5, Timestamp: ts},
+	}
+	m.tailOffsets = map[int]int64{0: 11, 1: 6}
+
+	view := m.renderTopicsView()
+	assert.Contains(t, view, "TAIL orders")
+	assert.Contains(t, view, "2 msgs", "header shows buffered message count")
+	assert.Contains(t, view, "last 12:03:04.567", "header shows last-message timestamp")
+	assert.Contains(t, view, "p0→11", "header shows partition/offset summary")
+	assert.Contains(t, view, "p1→6", "header shows partition/offset summary")
+	assert.Contains(t, view, "following")
+}
+
+func TestRenderTailViewPausedKeepsStatus(t *testing.T) {
+	m := NewModelWithStore(nil)
+	m.ready = true
+	m.openTailView("orders")
+	m.tailPaused = true
+	m.tailMessages = []tail.Message{{Topic: "orders", Partition: 0, Offset: 10}}
+
+	view := m.renderTopicsView()
+	assert.Contains(t, view, "paused", "paused status must remain in the header")
+}
