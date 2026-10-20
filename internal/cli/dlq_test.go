@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -57,6 +58,22 @@ func TestDLQReplayDryRunLineCountsCandidates(t *testing.T) {
 		"would replay 5 of 10 messages (3 filtered, 2 skipped)\n",
 		replayDryRunLine(res),
 		"filtered and skipped messages are excluded from candidates")
+}
+
+func TestDLQReplayDryRunCommandReportsCandidates(t *testing.T) {
+	orig := dlqReplay
+	dlqReplay = func(context.Context, dlq.ReplayOptions) (*dlq.ReplayResult, error) {
+		return &dlq.ReplayResult{DryRun: true, Total: 12, Filtered: 1, Skipped: 1}, nil
+	}
+	t.Cleanup(func() { dlqReplay = orig })
+
+	var buf bytes.Buffer
+	root := NewRootCommand("test")
+	root.SetOut(&buf)
+	root.SetArgs([]string{"dlq", "replay", "--topic", "x.dlq", "--dry-run"})
+	require.NoError(t, root.Execute())
+	assert.Contains(t, buf.String(), "would replay 10 of 12 messages",
+		"dry-run command prints the candidate count, not produced messages")
 }
 
 func TestDLQReplayRejectsBadFilter(t *testing.T) {
