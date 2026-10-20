@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pulsedev/streampulse/internal/dlq"
 )
 
 // brokerAvailable reports whether a local test broker (docker compose,
@@ -41,6 +43,20 @@ func TestDLQReplayRequiresTopic(t *testing.T) {
 	err := root.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--topic")
+}
+
+func TestDLQReplayDryRunLineCountsCandidates(t *testing.T) {
+	res := &dlq.ReplayResult{DryRun: true, Total: 12}
+	assert.Equal(t,
+		"would replay 12 of 12 messages (0 filtered, 0 skipped)\n",
+		replayDryRunLine(res),
+		"dry run reports candidates, not produced messages")
+
+	res = &dlq.ReplayResult{DryRun: true, Total: 10, Filtered: 3, Skipped: 2}
+	assert.Equal(t,
+		"would replay 5 of 10 messages (3 filtered, 2 skipped)\n",
+		replayDryRunLine(res),
+		"filtered and skipped messages are excluded from candidates")
 }
 
 func TestDLQReplayRejectsBadFilter(t *testing.T) {
