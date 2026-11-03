@@ -250,3 +250,32 @@ func readAllMessages(t *testing.T, brokers []string, topic string) []kafka.Messa
 	}
 	return msgs
 }
+
+// --limit caps the read window, not just the produce step: the DLQ is seeded
+// well past the limit, and the replay must touch only the allowed messages
+// (#35).
+func TestReplayLimitCapsTheReadWindow(t *testing.T) {
+	brokers := requireBroker(t)
+	dlq, orig := createScratchTopic(t, "replay-limit", 1)
+	seed := make([]kafka.Message, 0, 50)
+	for i := 0; i < 50; i++ {
+		seed = append(seed, kafka.Message{
+			Key:   []byte(fmt.Sprintf("k%d", i)),
+			Value: []byte(fmt.Sprintf(`{"id":%d}`, i)),
+		})
+	}
+	produceToPartition(t, brokers, dlq, 0, seed)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const limit = 10
+	res, err := Replay(ctx, ReplayOptions{Brokers: brokers, Topic: dlq, Limit: limit})
+	require.NoError(t, err)
+	assert.LessOrEqual(t, res.Total, int64(limit), "res.Total must not exceed the limit")
+	assert.Equal(t, int64(limit), res.Total)
+	assert.Equal(t, int64(limit), res.Replayed)
+
+	msgs := readAllMessages(t, brokers, orig)
+	require.Len(t, msgs, limit, "only the limit is replayed to the original topic")
+}
