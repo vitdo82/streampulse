@@ -144,12 +144,28 @@ func Replay(ctx context.Context, opts ReplayOptions) (*ReplayResult, error) {
 	res := &ReplayResult{DryRun: opts.DryRun}
 
 	var ranges []partitionRange
+	remaining := opts.Limit
 	for _, pp := range positions {
-		msgs, err := readRange(ctx, opts.Brokers[0], opts.Topic, pp.partition, pp.start, pp.hw)
+		end := pp.hw
+		if remaining > 0 && end-pp.start > int64(remaining) {
+			// Cap the read window at the messages still allowed: --limit is meant
+			// to make a replay cheap, and reading every partition to its
+			// high-watermark first made a 1M-message DLQ cost hundreds of MB for
+			// --limit 10 (#35). Partitions are replayed in this order, so the cap
+			// keeps exactly the messages the old loop would have produced first.
+			end = pp.start + int64(remaining)
+		}
+		msgs, err := readRange(ctx, opts.Brokers[0], opts.Topic, pp.partition, pp.start, end)
 		if err != nil {
 			return res, fmt.Errorf("dlq: replay %q: partition %d: %w", opts.Topic, pp.partition, err)
 		}
 		ranges = append(ranges, partitionRange{partition: pp.partition, msgs: msgs})
+		if remaining > 0 {
+			remaining -= len(msgs)
+			if remaining < 0 {
+				remaining = 0
+			}
+		}
 	}
 
 	// With skip-existing, scan the DLQ for marker copies left by earlier
